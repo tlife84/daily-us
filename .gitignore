@@ -1,0 +1,8 @@
+.env
+.venv/
+.us-insight-profile/
+data/
+downloads/
+__pycache__/
+*.py[cod]
+*.log

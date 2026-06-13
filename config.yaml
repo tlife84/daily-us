@@ -1,0 +1,24 @@
+site:
+  feed_url: "https://us-insight.com/feed?type=all"
+  profile_dir: ".us-insight-profile"
+  auth_state_path: "data/auth_state.json"
+  session_storage_path: "data/session_storage.json"
+  headless: true
+  navigation_timeout_ms: 45000
+
+storage:
+  database_path: "data/seen.sqlite3"
+  download_dir: "downloads"
+
+telegram:
+  bot_token_env: "TELEGRAM_BOT_TOKEN"
+  chat_id_env: "TELEGRAM_CHAT_ID"
+
+watchers:
+  - name: "good_morning_damsaem"
+    title_contains: "굿모닝 담쌤"
+    audio_filename_template: "굿모닝 담쌤 {mm-dd}"
+    only_today: true
+    active_hours: ["07:00", "09:10"]
+    interval_minutes: 10
+    max_posts_per_poll: 5
