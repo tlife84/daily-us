@@ -17,8 +17,17 @@ telegram:
 watchers:
   - name: "good_morning_damsaem"
     title_contains: "굿모닝 담쌤"
+    send_audio: true
     audio_filename_template: "굿모닝 담쌤 {mm-dd}"
     only_today: true
     active_hours: ["07:00", "09:10"]
     interval_minutes: 10
+    max_posts_per_poll: 5
+
+  - name: "always_date"
+    title_contains: "언제나 데이트"
+    title_exclude_contains: ["영상"]
+    send_audio: false
+    active_hours: ["07:00", "22:00"]
+    interval_minutes: 60
     max_posts_per_poll: 5

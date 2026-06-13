@@ -35,6 +35,8 @@ class TelegramConfig:
 class WatcherConfig:
     name: str
     title_contains: str
+    title_exclude_contains: tuple[str, ...]
+    send_audio: bool
     audio_filename_template: str | None
     only_today: bool
     active_hours: tuple[time, time] | None
@@ -113,6 +115,8 @@ def _parse_watcher(raw: dict[str, Any]) -> WatcherConfig:
     return WatcherConfig(
         name=str(raw["name"]),
         title_contains=str(raw.get("title_contains", "")),
+        title_exclude_contains=tuple(str(item) for item in raw.get("title_exclude_contains", [])),
+        send_audio=bool(raw.get("send_audio", True)),
         audio_filename_template=audio_filename_template,
         only_today=bool(raw.get("only_today", False)),
         active_hours=parsed_hours,

@@ -161,7 +161,7 @@ class UsInsightClient:
                 referer_url=post.url,
                 user_agent=user_agent,
             )
-            body_text = _extract_post_body_text(page) or post.title
+            body_text = _extract_post_body_text(page) or _escape_markdown_v2(post.title)
             return DownloadedAudio(path=audio_path, body_text=body_text)
         finally:
             page.close()
@@ -173,7 +173,7 @@ class UsInsightClient:
             self._goto(page, post.url)
             self._wait_for_network_idle(page)
             self._wait_for_page_settle(page)
-            return _extract_post_body_text(page) or post.title
+            return _extract_post_body_text(page) or _escape_markdown_v2(post.title)
         finally:
             page.close()
 
@@ -520,38 +520,210 @@ def _date_slug_from_title(title: str) -> str:
 
 
 def _extract_post_body_text(page: Page) -> str:
-    lines = page.evaluate(
+    body_markdown = page.evaluate(
         """
         () => {
           const editor = document.querySelector('.tiptap.ProseMirror');
-          if (!editor) return [];
+          if (!editor) return '';
 
-          const lines = [];
+          const escapeMarkdown = (value) => String(value || '')
+            .replace(/\\u00a0/g, ' ')
+            .replace(/([\\\\_*\\[\\]()~`>#+\\-=|{}.!])/g, '\\\\$1');
+
+          const normalizeText = (value) => String(value || '')
+            .replace(/\\u00a0/g, ' ')
+            .replace(/[ \\t\\r\\n]+/g, ' ')
+            .trim();
+
+          const escapeLinkUrl = (value) => String(value || '').replace(/[()\\\\]/g, '\\\\$&');
+
+          const renderPlain = (node) => escapeMarkdown(normalizeText(node.innerText || node.textContent || ''));
+
+          const renderInline = (node) => {
+            if (node.nodeType === Node.TEXT_NODE) {
+              return escapeMarkdown(node.nodeValue || '');
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE) {
+              return '';
+            }
+
+            const tagName = node.tagName.toLowerCase();
+            if (tagName === 'br') {
+              return '\\n';
+            }
+
+            const content = Array.from(node.childNodes).map(renderInline).join('');
+            if (!content.trim()) {
+              return '';
+            }
+
+            if (tagName === 'strong' || tagName === 'b') {
+              return `*${content}*`;
+            }
+            if (tagName === 'em' || tagName === 'i') {
+              return `_${content}_`;
+            }
+            if (tagName === 'u') {
+              return `__${content}__`;
+            }
+            if (tagName === 's' || tagName === 'strike' || tagName === 'del') {
+              return `~${content}~`;
+            }
+            if (tagName === 'code') {
+              const codeText = String(node.innerText || node.textContent || '')
+                .replace(/[\\\\`]/g, '\\\\$&');
+              return `\\`${codeText}\\``;
+            }
+            if (tagName === 'a') {
+              const href = node.getAttribute('href');
+              if (!href) {
+                return content;
+              }
+              return `[${content}](${escapeLinkUrl(node.href || href)})`;
+            }
+            return content;
+          };
+
+          const renderBlockquote = (element) => {
+            const lines = String(element.innerText || element.textContent || '')
+              .replace(/\\u00a0/g, ' ')
+              .split(/\\n+/)
+              .map((line) => normalizeText(line))
+              .filter(Boolean);
+            return lines.map((line) => `>${escapeMarkdown(line)}`).join('\\n');
+          };
+
+          const renderCallout = (element) => {
+            const content = element.querySelector('[data-node-view-content]') || element;
+            const lines = String(content.innerText || content.textContent || '')
+              .replace(/\\u00a0/g, ' ')
+              .split(/\\n+/)
+              .map((line) => normalizeText(line))
+              .filter(Boolean);
+            return lines.map((line) => `>${escapeMarkdown(line)}`).join('\\n');
+          };
+
+          const renderListItem = (element, prefix) => {
+            const parts = Array.from(element.children)
+              .map((child) => renderBlock(child))
+              .filter(Boolean);
+            const body = parts.length ? parts.join('\\n') : renderPlain(element);
+            if (!body) {
+              return '';
+            }
+            const lines = body.split('\\n');
+            return [prefix + lines[0], ...lines.slice(1)].join('\\n');
+          };
+
+          const renderList = (element) => {
+            const ordered = element.tagName.toLowerCase() === 'ol';
+            return Array.from(element.children)
+              .filter((child) => child.tagName && child.tagName.toLowerCase() === 'li')
+              .map((child, index) => {
+                const prefix = ordered ? `${index + 1}\\\\. ` : '\\\\- ';
+                return renderListItem(child, prefix);
+              })
+              .filter(Boolean)
+              .join('\\n');
+          };
+
+          const renderBlock = (element) => {
+            if (!element || !element.tagName) {
+              return '';
+            }
+
+            const className = element.className || '';
+            if (typeof className === 'string' && className.includes('node-imageBlock')) {
+              return '';
+            }
+            if (typeof className === 'string' && className.includes('node-callout')) {
+              return renderCallout(element);
+            }
+            if (element.dataset && element.dataset.type === 'horizontalRule') {
+              return '────────';
+            }
+
+            const tagName = element.tagName.toLowerCase();
+            if (tagName === 'h1' || tagName === 'h2' || tagName === 'h3') {
+              const title = renderPlain(element);
+              return title ? `_*${title}*_` : '';
+            }
+            if (tagName === 'p') {
+              return renderInline(element).replace(/[ \\t]+\\n/g, '\\n').trim();
+            }
+            if (tagName === 'blockquote') {
+              return renderBlockquote(element);
+            }
+            if (tagName === 'hr') {
+              return '────────';
+            }
+            if (tagName === 'ol' || tagName === 'ul') {
+              return renderList(element);
+            }
+            if (tagName === 'pre') {
+              const code = String(element.innerText || element.textContent || '')
+                .replace(/[\\\\`]/g, '\\\\$&')
+                .trim();
+              return code ? `\\`\\`\\`\\n${code}\\n\\`\\`\\`` : '';
+            }
+
+            const childBlocks = Array.from(element.children)
+              .map((child) => renderBlock(child))
+              .filter(Boolean);
+            if (childBlocks.length) {
+              return childBlocks.join('\\n');
+            }
+            return renderInline(element).trim();
+          };
+
+          const blocks = [];
           let hasStarted = false;
-          for (const child of Array.from(editor.children)) {
+          const children = Array.from(editor.children);
+          const hasMeaningfulContentAfter = (index) => {
+            for (const child of children.slice(index + 1)) {
+              const className = child.className || '';
+              if (typeof className === 'string' && className.includes('node-imageBlock')) {
+                continue;
+              }
+              if (child.dataset && child.dataset.type === 'horizontalRule') {
+                continue;
+              }
+              const text = normalizeText(child.innerText || child.textContent || '');
+              if (text) {
+                return true;
+              }
+            }
+            return false;
+          };
+
+          for (const [index, child] of children.entries()) {
             const className = child.className || '';
             if (typeof className === 'string' && className.includes('node-callout')) {
-              if (hasStarted) break;
-              continue;
+              if (hasStarted && !hasMeaningfulContentAfter(index)) {
+                break;
+              }
             }
             if (typeof className === 'string' && className.includes('node-imageBlock')) {
               continue;
             }
 
-            const text = (child.innerText || child.textContent || '').replace(/\\s+/g, ' ').trim();
-            if (!text) continue;
+            const block = renderBlock(child);
+            if (!block) continue;
 
             hasStarted = true;
-            lines.push(text);
+            blocks.push(block);
           }
-          return lines;
+          while (blocks.length > 0 && blocks[blocks.length - 1] === '────────') {
+            blocks.pop();
+          }
+          return blocks.join('\\n\\n').trim();
         }
         """
     )
-    if lines:
-        return "\n".join(_normalize_text(line) for line in lines if line).strip()
+    if body_markdown:
+        return str(body_markdown).strip()
 
-    return _extract_post_body_text_fallback(page)
+    return _escape_markdown_v2(_extract_post_body_text_fallback(page))
 
 
 def _extract_post_body_text_fallback(page: Page) -> str:
@@ -599,6 +771,11 @@ def _safe_filename(value: str) -> str:
 
 def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _escape_markdown_v2(text: str) -> str:
+    special_chars = "\\_*[]()~`>#+-=|{}.!"
+    return "".join(f"\\{char}" if char in special_chars else char for char in text)
 
 
 def _dedupe(values: Iterable[str]) -> list[str]:

@@ -8,12 +8,21 @@ from dotenv import load_dotenv
 from daily_us.config import load_config
 from daily_us.poller import (
     poll_once,
+    DEFAULT_SEED_LIMIT,
     run_forever,
+    seed_seen_posts,
     send_latest_body_for_test,
     send_latest_for_test,
 )
 from daily_us.site import UsInsightClient
 from daily_us.telegram import TelegramClient
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be 1 or greater")
+    return parsed
 
 
 def main() -> None:
@@ -45,6 +54,12 @@ def main() -> None:
         "--watcher",
         help="Watcher name to test. Defaults to all watchers.",
     )
+    test_latest_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=1,
+        help="Number of recent matching posts to test. Defaults to 1.",
+    )
     test_latest_body_parser = subparsers.add_parser(
         "test-latest-body",
         help="Send only the newest matching post body without audio or seen history.",
@@ -53,7 +68,31 @@ def main() -> None:
         "--watcher",
         help="Watcher name to test. Defaults to all watchers.",
     )
-    subparsers.add_parser("poll", help="Run one poll immediately, ignoring active hours.")
+    test_latest_body_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=1,
+        help="Number of recent matching posts to test. Defaults to 1.",
+    )
+    poll_parser = subparsers.add_parser("poll", help="Run one poll immediately, ignoring active hours.")
+    poll_parser.add_argument(
+        "--watcher",
+        help="Watcher name to poll. Defaults to all watchers.",
+    )
+    seed_seen_parser = subparsers.add_parser(
+        "seed-seen",
+        help="Mark recent matching posts as seen without sending them.",
+    )
+    seed_seen_parser.add_argument(
+        "--watcher",
+        help="Watcher name to seed. Defaults to all watchers.",
+    )
+    seed_seen_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=DEFAULT_SEED_LIMIT,
+        help=f"Number of recent matching posts to seed. Defaults to {DEFAULT_SEED_LIMIT}.",
+    )
     subparsers.add_parser("run", help="Run continuously using watcher schedules.")
 
     args = parser.parse_args()
@@ -109,16 +148,18 @@ def main() -> None:
         print("Telegram HTML test message sent.")
     elif args.command == "test-telegram-markdown":
         TelegramClient(config.telegram).send_message(
-            "*MarkdownV2 굵게 테스트*\n<아침> 문자는 그대로 보여야 합니다\\.",
+            "*MarkdownV2 굵게 테스트*\n\\<아침\\> 문자는 그대로 보여야 합니다\\.",
             parse_mode="MarkdownV2",
         )
         print("Telegram MarkdownV2 test message sent.")
     elif args.command == "test-latest":
-        send_latest_for_test(config, watcher_name=args.watcher)
+        send_latest_for_test(config, watcher_name=args.watcher, limit=args.limit)
     elif args.command == "test-latest-body":
-        send_latest_body_for_test(config, watcher_name=args.watcher)
+        send_latest_body_for_test(config, watcher_name=args.watcher, limit=args.limit)
     elif args.command == "poll":
-        poll_once(config, ignore_schedule=True)
+        poll_once(config, ignore_schedule=True, watcher_name=args.watcher)
+    elif args.command == "seed-seen":
+        seed_seen_posts(config, watcher_name=args.watcher, limit=args.limit)
     elif args.command == "run":
         run_forever(config)
 
