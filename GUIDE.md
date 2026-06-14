@@ -121,6 +121,7 @@ Windows:
 ```powershell
 .\.venv\Scripts\python.exe -m daily_us poll --watcher good_morning_damsaem
 .\.venv\Scripts\python.exe -m daily_us poll --watcher always_date
+.\.venv\Scripts\python.exe -m daily_us poll --watcher company_analysis_guide
 ```
 
 macOS:
@@ -128,6 +129,7 @@ macOS:
 ```bash
 .venv/bin/python -m daily_us poll --watcher good_morning_damsaem
 .venv/bin/python -m daily_us poll --watcher always_date
+.venv/bin/python -m daily_us poll --watcher company_analysis_guide
 ```
 
 주의: `poll`은 `config.yaml`의 `active_hours`를 무시하고 즉시 1회 실행합니다. 따라서 OS 스케줄러에서 실행 시간을 정확히 잡아야 합니다.
@@ -151,6 +153,7 @@ python -m daily_us test-telegram-markdown
 ```bash
 python -m daily_us test-latest --watcher good_morning_damsaem
 python -m daily_us test-latest --watcher good_morning_damsaem --limit 3
+python -m daily_us test-latest --watcher company_analysis_guide
 ```
 
 mp3 없이 본문만 테스트:
@@ -262,6 +265,12 @@ Start-ScheduledTask -TaskName "daily-us good morning"
 -m daily_us poll --watcher always_date
 ```
 
+`기업분석도감`은 일요일 12:00부터 20:00까지 1시간마다 실행하는 작업을 따로 만듭니다. 동작의 인수는 아래처럼 지정합니다.
+
+```text
+-m daily_us poll --watcher company_analysis_guide
+```
+
 ## 7. macOS 스케줄러 등록
 
 macOS에서는 `launchd`를 권장합니다. 간단히 쓰려면 `cron`도 가능합니다.
@@ -356,9 +365,10 @@ crontab -e
 */10 7-8 * * * cd /path/to/daily-us && /path/to/daily-us/.venv/bin/python -m daily_us poll --watcher good_morning_damsaem >> /path/to/daily-us/daily-us.log 2>&1
 0,10 9 * * * cd /path/to/daily-us && /path/to/daily-us/.venv/bin/python -m daily_us poll --watcher good_morning_damsaem >> /path/to/daily-us/daily-us.log 2>&1
 0 7-22 * * * cd /path/to/daily-us && /path/to/daily-us/.venv/bin/python -m daily_us poll --watcher always_date >> /path/to/daily-us/daily-us.log 2>&1
+0 12-20 * * 0 cd /path/to/daily-us && /path/to/daily-us/.venv/bin/python -m daily_us poll --watcher company_analysis_guide >> /path/to/daily-us/daily-us.log 2>&1
 ```
 
-이렇게 하면 `굿모닝 담쌤`은 7:00~8:50은 10분마다, 9:00과 9:10에도 실행되고, `언제나 데이트`는 7:00~22:00 정각마다 실행됩니다.
+이렇게 하면 `굿모닝 담쌤`은 7:00~8:50은 10분마다, 9:00과 9:10에도 실행되고, `언제나 데이트`는 7:00~22:00 정각마다 실행됩니다. `기업분석도감`은 일요일 12:00~20:00 정각마다 실행됩니다.
 
 ## 8. 상시 실행 모드
 
@@ -392,10 +402,23 @@ watchers:
     active_hours: ["07:00", "22:00"]
     interval_minutes: 60
     max_posts_per_poll: 5
+
+  - name: "company_analysis_guide"
+    title_contains: "기업분석도감"
+    send_audio: false
+    send_pdf: true
+    active_days: ["sun"]
+    active_hours: ["12:00", "20:00"]
+    interval_minutes: 60
+    max_posts_per_poll: 5
 ```
 
 `only_today: true`는 제목의 `M월 D일`이 오늘 날짜인 게시글만 처리합니다. 오늘 글이 발견되면 이전 날짜 글은 완료 처리하여 더 이상 붙잡지 않습니다.
 
 `send_audio: false`는 미디어 다운로드를 시도하지 않고 본문만 텔레그램으로 보냅니다.
+
+`send_pdf: true`는 게시글 API의 PDF 첨부를 다운로드해서 텔레그램 문서로 보냅니다.
+
+`active_days`는 watcher가 실행될 요일을 제한합니다. `["sun"]`은 일요일만 실행한다는 뜻입니다.
 
 `title_exclude_contains`는 제목/피드 카드 텍스트에 해당 키워드가 포함된 글을 제외합니다. `언제나 데이트` watcher는 영상 글을 제외하기 위해 `["영상"]`을 사용합니다.

@@ -4,6 +4,7 @@ import logging
 import re
 import time as time_module
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from daily_us.config import AppConfig, WatcherConfig
 from daily_us.site import AudioNotAvailableYet, PostRef, UsInsightClient
@@ -21,12 +22,12 @@ def poll_once(
 ) -> None:
     store = SeenStore(config.storage.database_path)
     telegram = TelegramClient(config.telegram)
-    now = datetime.now().time()
+    now = datetime.now()
     watchers = [
         watcher
         for watcher in config.watchers
         if (watcher_name is None or watcher.name == watcher_name)
-        and (ignore_schedule or watcher.is_active_now(now))
+        and (ignore_schedule or watcher.is_active_at(now))
     ]
 
     if not watchers:
@@ -158,7 +159,7 @@ def run_forever(config: AppConfig) -> None:
             due_watchers = [
                 watcher
                 for watcher in config.watchers
-                if watcher.is_active_now(now.time()) and now >= next_run[watcher.name]
+                if watcher.is_active_at(now) and now >= next_run[watcher.name]
             ]
 
             if due_watchers:
@@ -194,6 +195,31 @@ def _process_watcher(
     for post in posts:
         if store.has_seen(watcher.name, post.post_id):
             LOGGER.info("Already sent: %s", post.title)
+            continue
+
+        if watcher.send_pdf:
+            try:
+                content = client.fetch_post_content(post, config.storage.download_dir)
+            except Exception:
+                LOGGER.exception("Failed to fetch PDF content for post: %s", post.title)
+                continue
+
+            has_pdf = bool(content.pdf_paths)
+            if has_pdf and not _send_documents(telegram, content.pdf_paths, post.title):
+                continue
+
+            if not content.pdf_paths:
+                LOGGER.warning(
+                    "No PDF attachment found; sending body only and marking seen: %s",
+                    post.title,
+                )
+
+            if _send_body_messages(telegram, content.body_text, post.title):
+                store.mark_seen(watcher.name, post.post_id, post.title, post.url)
+                if has_pdf:
+                    LOGGER.info("Sent body and PDF(s) to Telegram: %s", post.title)
+                else:
+                    LOGGER.info("Sent PDF watcher post without PDF to Telegram: %s", post.title)
             continue
 
         if not watcher.send_audio:
@@ -234,6 +260,42 @@ def _process_latest_for_test(
         return
 
     for index, post in enumerate(posts, start=1):
+        if watcher.send_pdf:
+            try:
+                content = client.fetch_post_content(post, config.storage.download_dir)
+            except Exception:
+                LOGGER.exception("Failed to fetch latest PDF test post: %s", post.title)
+                continue
+
+            documents_sent = True
+            if content.pdf_paths:
+                documents_sent = _send_documents(telegram, content.pdf_paths, post.title)
+            else:
+                LOGGER.warning(
+                    "No PDF attachment found for latest test post; sending body only: %s",
+                    post.title,
+                )
+
+            body_sent = False
+            if documents_sent:
+                body_sent = _send_body_messages(telegram, content.body_text, post.title)
+
+            if body_sent and documents_sent:
+                LOGGER.info(
+                    "Sent latest PDF test post %s/%s to Telegram without marking seen: %s",
+                    index,
+                    len(posts),
+                    post.title,
+                )
+            else:
+                LOGGER.warning(
+                    "Failed to send latest PDF test post %s/%s to Telegram: %s",
+                    index,
+                    len(posts),
+                    post.title,
+                )
+            continue
+
         if not watcher.send_audio:
             body_text = client.fetch_post_body_text(post)
             if _send_body_messages(telegram, body_text, post.title):
@@ -309,6 +371,16 @@ def _send_body_messages(telegram: TelegramClient, body_text: str, post_title: st
             telegram.send_message(message, parse_mode="MarkdownV2")
     except Exception:
         LOGGER.exception("Body message failed for post: %s", post_title)
+        return False
+    return True
+
+
+def _send_documents(telegram: TelegramClient, paths: list[Path], post_title: str) -> bool:
+    try:
+        for path in paths:
+            telegram.send_document(path)
+    except Exception:
+        LOGGER.exception("Document send failed for post: %s", post_title)
         return False
     return True
 

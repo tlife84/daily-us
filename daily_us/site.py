@@ -4,12 +4,14 @@ import json
 import logging
 import re
 import subprocess
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import unquote, urljoin, urlparse
 
 import imageio_ffmpeg
+import requests
 from playwright.sync_api import (
     Browser,
     BrowserContext,
@@ -36,6 +38,12 @@ class PostRef:
 class DownloadedAudio:
     path: Path
     body_text: str
+
+
+@dataclass(frozen=True)
+class DownloadedPostContent:
+    body_text: str
+    pdf_paths: list[Path]
 
 
 class AudioNotAvailableYet(RuntimeError):
@@ -176,6 +184,73 @@ class UsInsightClient:
             return _extract_post_body_text(page) or _escape_markdown_v2(post.title)
         finally:
             page.close()
+
+    def fetch_post_content(
+        self,
+        post: PostRef,
+        download_dir: Path,
+    ) -> DownloadedPostContent:
+        page = self._new_page()
+        content_payloads: list[dict[str, object]] = []
+        post_cms_id = _post_cms_id_from_url(post.url)
+
+        def on_response(response: Response) -> None:
+            if f"/v2/contents/secret/{post_cms_id}" not in response.url:
+                return
+            try:
+                content_payloads.append(json.loads(response.text()))
+            except Exception:
+                LOGGER.exception("Could not read post content API response: %s", response.url)
+
+        page.on("response", on_response)
+        try:
+            LOGGER.info("Opening post for content and PDFs: %s", post.url)
+            self._goto(page, post.url)
+            self._wait_for_network_idle(page)
+            self._wait_for_page_settle(page)
+
+            body_text = _extract_post_body_text(page) or _escape_markdown_v2(post.title)
+            pdf_paths = []
+            for pdf in _extract_pdf_items(content_payloads):
+                pdf_paths.append(self._download_pdf(pdf["url"], pdf["filename"], download_dir))
+            return DownloadedPostContent(body_text=body_text, pdf_paths=pdf_paths)
+        finally:
+            page.close()
+
+    def _download_pdf(self, pdf_url: str, filename: str, download_dir: Path) -> Path:
+        download_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = _safe_filename(unicodedata.normalize("NFC", filename))
+        if not safe_name.lower().endswith(".pdf"):
+            safe_name = f"{safe_name}.pdf"
+
+        target = _unique_path(download_dir / safe_name)
+        partial_target = _unique_path(target.with_name(f"{target.name}.part"))
+        first_bytes = b""
+
+        try:
+            with requests.get(pdf_url, stream=True, timeout=120) as response:
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "").lower()
+
+                with partial_target.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        if len(first_bytes) < 8:
+                            first_bytes += chunk[: 8 - len(first_bytes)]
+                        handle.write(chunk)
+
+                if "pdf" not in content_type and not first_bytes.startswith(b"%PDF"):
+                    raise RuntimeError(
+                        f"Downloaded file is not a PDF: {content_type} {pdf_url}"
+                    )
+
+            partial_target.replace(target)
+            return target
+        except Exception:
+            if partial_target.exists():
+                partial_target.unlink()
+            raise
 
     def _download_media(
         self,
@@ -519,6 +594,35 @@ def _date_slug_from_title(title: str) -> str:
     return "unknown-date"
 
 
+def _post_cms_id_from_url(url: str) -> str:
+    path_parts = [part for part in urlparse(url).path.split("/") if part]
+    if not path_parts:
+        raise RuntimeError(f"Could not extract post id from URL: {url}")
+    return path_parts[-1]
+
+
+def _extract_pdf_items(payloads: list[dict[str, object]]) -> list[dict[str, str]]:
+    pdf_items: list[dict[str, str]] = []
+    for payload in payloads:
+        content = payload.get("content")
+        if not isinstance(content, dict):
+            continue
+        raw_pdfs = content.get("pdf")
+        if not isinstance(raw_pdfs, list):
+            continue
+        for raw_pdf in raw_pdfs:
+            if not isinstance(raw_pdf, dict):
+                continue
+            pdf_url = raw_pdf.get("pdfUrl")
+            filename = raw_pdf.get("fileName")
+            if not isinstance(pdf_url, str) or not pdf_url:
+                continue
+            if not isinstance(filename, str) or not filename:
+                filename = _filename_from_url(pdf_url) or "attachment.pdf"
+            pdf_items.append({"url": pdf_url, "filename": filename})
+    return _dedupe_pdf_items(pdf_items)
+
+
 def _extract_post_body_text(page: Page) -> str:
     body_markdown = page.evaluate(
         """
@@ -784,6 +888,17 @@ def _dedupe(values: Iterable[str]) -> list[str]:
     for value in values:
         if value not in seen:
             seen.add(value)
+            result.append(value)
+    return result
+
+
+def _dedupe_pdf_items(values: Iterable[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    result: list[dict[str, str]] = []
+    for value in values:
+        pdf_url = value["url"]
+        if pdf_url not in seen:
+            seen.add(pdf_url)
             result.append(value)
     return result
 

@@ -33,6 +33,21 @@ class TelegramClient:
             )
         _raise_for_telegram_error(response, "sendAudio")
 
+    def send_document(self, document_path: Path, caption: str | None = None) -> None:
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendDocument"
+        data = {"chat_id": self.chat_id}
+        if caption:
+            data["caption"] = caption
+
+        with document_path.open("rb") as document:
+            response = requests.post(
+                url,
+                data=data,
+                files={"document": (document_path.name, document, "application/pdf")},
+                timeout=120,
+            )
+        _raise_for_telegram_error(response, "sendDocument")
+
     def send_message(self, text: str, parse_mode: str | None = None) -> None:
         data = {"chat_id": self.chat_id, "text": text}
         if parse_mode:

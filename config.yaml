@@ -31,3 +31,12 @@ watchers:
     active_hours: ["07:00", "22:00"]
     interval_minutes: 60
     max_posts_per_poll: 5
+
+  - name: "company_analysis_guide"
+    title_contains: "기업분석도감"
+    send_audio: false
+    send_pdf: true
+    active_days: ["sun"]
+    active_hours: ["12:00", "20:00"]
+    interval_minutes: 60
+    max_posts_per_poll: 5
