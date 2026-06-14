@@ -36,6 +36,8 @@ python -m playwright install chromium
 ```dotenv
 TELEGRAM_BOT_TOKEN=123456:telegram-bot-token
 TELEGRAM_CHAT_ID=123456789
+TELEGRAM_CHAT_IDS=123456789,987654321
+TELEGRAM_ADMIN_CHAT_ID=123456789
 ```
 
 개인 채팅 `chat_id`는 봇에게 아무 메시지나 보낸 뒤 아래 명령으로 확인할 수 있습니다.
@@ -45,6 +47,10 @@ python -m daily_us telegram-updates
 ```
 
 `TELEGRAM_CHAT_ID`는 봇 토큰 앞 숫자가 아니라, `telegram-updates`에서 `type=private`로 나온 `chat_id`여야 합니다.
+
+여러 사람에게 동시에 보내려면 `TELEGRAM_CHAT_IDS`에 쉼표로 구분해서 입력합니다. `TELEGRAM_CHAT_IDS`가 있으면 일반 게시글은 이 값의 모든 채팅으로 전송되고, 없으면 기존 `TELEGRAM_CHAT_ID` 한 곳으로 전송됩니다.
+
+`TELEGRAM_ADMIN_CHAT_ID`는 로그인 세션 만료 같은 운영 알림을 받을 개인 채팅 ID입니다. 비워 두면 기존 `TELEGRAM_CHAT_ID`로 알림을 보냅니다.
 
 또는 아래 주소를 브라우저에서 열어 확인할 수도 있습니다.
 

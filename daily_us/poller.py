@@ -7,12 +7,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from daily_us.config import AppConfig, WatcherConfig
-from daily_us.site import AudioNotAvailableYet, PostRef, UsInsightClient
+from daily_us.site import AudioNotAvailableYet, LoginRequired, PostRef, UsInsightClient
 from daily_us.storage import SeenStore
 from daily_us.telegram import TelegramClient
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_SEED_LIMIT = 100
+LOGIN_ALERT_COOLDOWN_MINUTES = 60
 
 
 def poll_once(
@@ -36,7 +37,12 @@ def poll_once(
 
     with UsInsightClient(config.site) as client:
         for watcher in watchers:
-            _process_watcher(client, store, telegram, config, watcher)
+            try:
+                _process_watcher(client, store, telegram, config, watcher)
+            except LoginRequired as exc:
+                LOGGER.warning("Login is required while polling watcher %s: %s", watcher.name, exc)
+                _notify_login_required(telegram, store, watcher.name, exc)
+                break
 
 
 def send_latest_for_test(
@@ -167,6 +173,14 @@ def run_forever(config: AppConfig) -> None:
                     for watcher in due_watchers:
                         try:
                             _process_watcher(client, store, telegram, config, watcher)
+                        except LoginRequired as exc:
+                            LOGGER.warning(
+                                "Login is required while polling watcher %s: %s",
+                                watcher.name,
+                                exc,
+                            )
+                            _notify_login_required(telegram, store, watcher.name, exc)
+                            break
                         except Exception:
                             LOGGER.exception("Watcher failed: %s", watcher.name)
                         finally:
@@ -243,6 +257,36 @@ def _process_watcher(
         store.mark_seen(watcher.name, post.post_id, post.title, post.url)
         _send_body_messages(telegram, audio.body_text, post.title)
         LOGGER.info("Sent to Telegram: %s", post.title)
+
+
+def _notify_login_required(
+    telegram: TelegramClient,
+    store: SeenStore,
+    watcher_name: str,
+    exc: Exception,
+) -> None:
+    if not store.should_send_notification("login_required", LOGIN_ALERT_COOLDOWN_MINUTES):
+        LOGGER.info(
+            "Login-required admin alert suppressed by %s minute cooldown.",
+            LOGIN_ALERT_COOLDOWN_MINUTES,
+        )
+        return
+
+    message = (
+        "US Insight 로그인 세션이 만료된 것 같습니다.\n\n"
+        f"감지 watcher: {watcher_name}\n"
+        f"감지 시각: {datetime.now():%Y-%m-%d %H:%M:%S}\n\n"
+        "다시 로그인:\n"
+        "python -m daily_us login\n\n"
+        "확인:\n"
+        "python -m daily_us check-login\n\n"
+        f"오류: {exc}"
+    )
+    try:
+        telegram.send_admin_message(message)
+        LOGGER.info("Sent login-required admin alert.")
+    except Exception:
+        LOGGER.exception("Failed to send login-required admin alert.")
 
 
 def _process_latest_for_test(

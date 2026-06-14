@@ -49,6 +49,8 @@ python -m playwright install chromium
 ```dotenv
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
+TELEGRAM_CHAT_IDS=...
+TELEGRAM_ADMIN_CHAT_ID=...
 ```
 
 개인 채팅 ID 확인:
@@ -56,6 +58,10 @@ TELEGRAM_CHAT_ID=...
 ```bash
 python -m daily_us telegram-updates
 ```
+
+여러 사람에게 동시에 보내려면 `TELEGRAM_CHAT_IDS`에 쉼표로 구분해서 채팅 ID를 넣습니다. 이 값이 있으면 일반 게시글은 모든 채팅으로 전송되고, 없으면 기존 `TELEGRAM_CHAT_ID` 한 곳으로 전송됩니다.
+
+`TELEGRAM_ADMIN_CHAT_ID`는 로그인 세션 만료 같은 운영 알림을 받을 개인 채팅 ID입니다. 비워 두면 `TELEGRAM_CHAT_ID`로 알림을 보냅니다.
 
 ## 2. 로그인
 

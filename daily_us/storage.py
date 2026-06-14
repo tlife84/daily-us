@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -29,6 +32,31 @@ class SeenStore:
                 (watcher_name, post_id, post_title, post_url),
             )
 
+    def should_send_notification(self, key: str, cooldown_minutes: int) -> bool:
+        now = datetime.now()
+        with self._connect() as conn:
+            row = conn.execute(
+                "select sent_at from app_notifications where notification_key = ?",
+                (key,),
+            ).fetchone()
+            if row:
+                try:
+                    sent_at = datetime.fromisoformat(str(row[0]))
+                except ValueError:
+                    sent_at = datetime.min
+                if now - sent_at < timedelta(minutes=cooldown_minutes):
+                    return False
+
+            conn.execute(
+                """
+                insert into app_notifications (notification_key, sent_at)
+                values (?, ?)
+                on conflict(notification_key) do update set sent_at = excluded.sent_at
+                """,
+                (key, now.isoformat(timespec="seconds")),
+            )
+            return True
+
     def _init_schema(self) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -43,6 +71,20 @@ class SeenStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                create table if not exists app_notifications (
+                    notification_key text not null primary key,
+                    sent_at text not null
+                )
+                """
+            )
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.database_path)
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.database_path)
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()

@@ -50,6 +50,10 @@ class AudioNotAvailableYet(RuntimeError):
     """Raised when a post exists but its audio player/media URL is not available yet."""
 
 
+class LoginRequired(RuntimeError):
+    """Raised when US Insight no longer accepts the saved login session."""
+
+
 class UsInsightClient:
     def __init__(self, config: SiteConfig) -> None:
         self.config = config
@@ -116,7 +120,7 @@ class UsInsightClient:
             self._wait_for_network_idle(page)
             self._wait_for_page_settle(page)
             if self._is_logged_out(page):
-                raise RuntimeError(
+                raise LoginRequired(
                     "US Insight is not available as a logged-in feed page. "
                     "This may mean the session expired, the sign-in page is showing, "
                     "or the page could not be inspected during a temporary load/render issue. "

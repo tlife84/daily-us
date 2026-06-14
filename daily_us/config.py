@@ -29,6 +29,8 @@ class StorageConfig:
 class TelegramConfig:
     bot_token_env: str
     chat_id_env: str
+    chat_ids_env: str
+    admin_chat_id_env: str
 
 
 @dataclass(frozen=True)
@@ -99,6 +101,10 @@ def load_config(path: str | Path) -> AppConfig:
         telegram=TelegramConfig(
             bot_token_env=str(telegram.get("bot_token_env", "TELEGRAM_BOT_TOKEN")),
             chat_id_env=str(telegram.get("chat_id_env", "TELEGRAM_CHAT_ID")),
+            chat_ids_env=str(telegram.get("chat_ids_env", "TELEGRAM_CHAT_IDS")),
+            admin_chat_id_env=str(
+                telegram.get("admin_chat_id_env", "TELEGRAM_ADMIN_CHAT_ID")
+            ),
         ),
         watchers=[_parse_watcher(item) for item in watchers],
     )

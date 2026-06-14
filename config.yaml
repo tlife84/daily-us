@@ -13,6 +13,8 @@ storage:
 telegram:
   bot_token_env: "TELEGRAM_BOT_TOKEN"
   chat_id_env: "TELEGRAM_CHAT_ID"
+  chat_ids_env: "TELEGRAM_CHAT_IDS"
+  admin_chat_id_env: "TELEGRAM_ADMIN_CHAT_ID"
 
 watchers:
   - name: "good_morning_damsaem"
