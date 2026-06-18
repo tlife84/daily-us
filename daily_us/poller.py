@@ -43,6 +43,9 @@ def poll_once(
                 LOGGER.warning("Login is required while polling watcher %s: %s", watcher.name, exc)
                 _notify_login_required(telegram, store, watcher.name, exc)
                 break
+            except Exception as exc:
+                LOGGER.exception("Watcher failed: %s", watcher.name)
+                _notify_poll_failure(telegram, watcher.name, "watcher failed", exc)
 
 
 def send_latest_for_test(
@@ -181,14 +184,24 @@ def run_forever(config: AppConfig) -> None:
                             )
                             _notify_login_required(telegram, store, watcher.name, exc)
                             break
-                        except Exception:
+                        except Exception as exc:
                             LOGGER.exception("Watcher failed: %s", watcher.name)
+                            _notify_poll_failure(
+                                telegram,
+                                watcher.name,
+                                "watcher failed",
+                                exc,
+                            )
                         finally:
                             next_run[watcher.name] = datetime.now() + timedelta(
                                 minutes=watcher.interval_minutes
                             )
-        except Exception:
+        except Exception as exc:
             LOGGER.exception("Poller loop failed; continuing after sleep.")
+            try:
+                _notify_poll_failure(telegram, "poller_loop", "poller loop failed", exc)
+            except Exception:
+                LOGGER.exception("Failed while sending poller loop failure alert.")
         finally:
             time_module.sleep(30)
 
@@ -214,12 +227,25 @@ def _process_watcher(
         if watcher.send_pdf:
             try:
                 content = client.fetch_post_content(post, config.storage.download_dir)
-            except Exception:
+            except Exception as exc:
                 LOGGER.exception("Failed to fetch PDF content for post: %s", post.title)
+                _notify_poll_failure(
+                    telegram,
+                    watcher.name,
+                    "failed to fetch PDF content",
+                    exc,
+                    post,
+                )
                 continue
 
             has_pdf = bool(content.pdf_paths)
             if has_pdf and not _send_documents(telegram, content.pdf_paths, post.title):
+                _notify_poll_failure(
+                    telegram,
+                    watcher.name,
+                    "failed to send PDF document",
+                    post=post,
+                )
                 continue
 
             if not content.pdf_paths:
@@ -234,6 +260,13 @@ def _process_watcher(
                     LOGGER.info("Sent body and PDF(s) to Telegram: %s", post.title)
                 else:
                     LOGGER.info("Sent PDF watcher post without PDF to Telegram: %s", post.title)
+            else:
+                _notify_poll_failure(
+                    telegram,
+                    watcher.name,
+                    "failed to send body message",
+                    post=post,
+                )
             continue
 
         if not watcher.send_audio:
@@ -241,6 +274,13 @@ def _process_watcher(
             if _send_body_messages(telegram, body_text, post.title):
                 store.mark_seen(watcher.name, post.post_id, post.title, post.url)
                 LOGGER.info("Sent body-only post to Telegram: %s", post.title)
+            else:
+                _notify_poll_failure(
+                    telegram,
+                    watcher.name,
+                    "failed to send body-only message",
+                    post=post,
+                )
             continue
 
         try:
@@ -255,7 +295,13 @@ def _process_watcher(
         audio_caption = audio.path.stem
         telegram.send_audio(audio.path, audio_caption)
         store.mark_seen(watcher.name, post.post_id, post.title, post.url)
-        _send_body_messages(telegram, audio.body_text, post.title)
+        if not _send_body_messages(telegram, audio.body_text, post.title):
+            _notify_poll_failure(
+                telegram,
+                watcher.name,
+                "failed to send audio body message",
+                post=post,
+            )
         LOGGER.info("Sent to Telegram: %s", post.title)
 
 
@@ -287,6 +333,38 @@ def _notify_login_required(
         LOGGER.info("Sent login-required admin alert.")
     except Exception:
         LOGGER.exception("Failed to send login-required admin alert.")
+
+
+def _notify_poll_failure(
+    telegram: TelegramClient,
+    watcher_name: str,
+    summary: str,
+    exc: Exception | None = None,
+    post: PostRef | None = None,
+) -> None:
+    lines = [
+        "daily-us poller 실패",
+        "",
+        f"watcher: {watcher_name}",
+        f"시각: {datetime.now():%Y-%m-%d %H:%M:%S}",
+        f"요약: {summary}",
+    ]
+    if post:
+        lines.extend(
+            [
+                "",
+                f"게시글: {post.title}",
+                f"URL: {post.url}",
+            ]
+        )
+    if exc:
+        lines.extend(["", f"오류: {type(exc).__name__}: {exc}"])
+
+    try:
+        telegram.send_admin_message("\n".join(lines))
+        LOGGER.info("Sent poll failure admin alert.")
+    except Exception:
+        LOGGER.exception("Failed to send poll failure admin alert.")
 
 
 def _process_latest_for_test(

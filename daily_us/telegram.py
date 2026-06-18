@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
-from pathlib import Path
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import requests
 
 from daily_us.config import TelegramConfig
+
+LOGGER = logging.getLogger(__name__)
 
 
 class TelegramClient:
@@ -43,7 +46,8 @@ class TelegramClient:
                 )
             _raise_for_telegram_error(response, "sendAudio")
 
-        _send_to_chat_ids(self.chat_ids, send_one, "sendAudio")
+        errors = _send_to_chat_ids(self.chat_ids, send_one, "sendAudio")
+        self._notify_admin_delivery_failure("sendAudio", errors)
 
     def send_document(self, document_path: Path, caption: str | None = None) -> None:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendDocument"
@@ -62,14 +66,16 @@ class TelegramClient:
                 )
             _raise_for_telegram_error(response, "sendDocument")
 
-        _send_to_chat_ids(self.chat_ids, send_one, "sendDocument")
+        errors = _send_to_chat_ids(self.chat_ids, send_one, "sendDocument")
+        self._notify_admin_delivery_failure("sendDocument", errors)
 
     def send_message(self, text: str, parse_mode: str | None = None) -> None:
-        _send_to_chat_ids(
+        errors = _send_to_chat_ids(
             self.chat_ids,
             lambda chat_id: self._send_message_to(chat_id, text, parse_mode=parse_mode),
             "sendMessage",
         )
+        self._notify_admin_delivery_failure("sendMessage", errors)
 
     def send_admin_message(self, text: str, parse_mode: str | None = None) -> None:
         if not self.admin_chat_id:
@@ -92,6 +98,22 @@ class TelegramClient:
             timeout=30,
         )
         _raise_for_telegram_error(response, "sendMessage")
+
+    def _notify_admin_delivery_failure(self, method: str, errors: list[str]) -> None:
+        if not errors:
+            return
+
+        message = (
+            "Telegram 일부 수신자 전송 실패\n\n"
+            f"메서드: {method}\n"
+            f"시각: {_now_text()}\n\n"
+            "실패 대상:\n"
+            + "\n".join(f"- {error}" for error in errors)
+        )
+        try:
+            self.send_admin_message(message)
+        except Exception:
+            LOGGER.exception("Failed to send Telegram delivery failure admin alert.")
 
     def get_updates(self) -> list[dict[str, Any]]:
         response = requests.get(
@@ -116,17 +138,37 @@ def _send_to_chat_ids(
     chat_ids: tuple[str, ...],
     send_one: Callable[[str], None],
     method: str,
-) -> None:
+) -> list[str]:
     errors = []
+    success_count = 0
     for chat_id in chat_ids:
         try:
             send_one(chat_id)
+            success_count += 1
         except Exception as exc:
             errors.append(f"{chat_id}: {exc}")
 
-    if errors:
-        joined_errors = "; ".join(errors)
-        raise RuntimeError(f"Telegram {method} failed for {len(errors)} recipient(s): {joined_errors}")
+    if not errors:
+        return []
+
+    joined_errors = "; ".join(errors)
+    if success_count:
+        LOGGER.warning(
+            "Telegram %s partially failed for %s recipient(s) after %s success(es): %s",
+            method,
+            len(errors),
+            success_count,
+            joined_errors,
+        )
+        return errors
+
+    raise RuntimeError(f"Telegram {method} failed for all recipient(s): {joined_errors}")
+
+
+def _now_text() -> str:
+    from datetime import datetime
+
+    return f"{datetime.now():%Y-%m-%d %H:%M:%S}"
 
 
 def _raise_for_telegram_error(response: requests.Response, method: str) -> None:
