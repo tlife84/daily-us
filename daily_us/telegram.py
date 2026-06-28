@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,33 @@ import requests
 from daily_us.config import TelegramConfig
 
 LOGGER = logging.getLogger(__name__)
+MAX_RECIPIENT_RETRIES = 2
+DEFAULT_RETRY_DELAYS_SECONDS = (10, 30)
+
+
+class TelegramDeliveryError(RuntimeError):
+    def __init__(self, method: str, errors: list[str]) -> None:
+        self.method = method
+        self.errors = errors
+        joined_errors = "; ".join(errors)
+        super().__init__(
+            f"Telegram {method} failed for all recipient(s): {joined_errors}"
+        )
+
+
+class TelegramApiError(RuntimeError):
+    def __init__(
+        self,
+        method: str,
+        status_code: int,
+        details: dict[str, Any] | str,
+        retry_after: int | None = None,
+    ) -> None:
+        self.method = method
+        self.status_code = status_code
+        self.details = details
+        self.retry_after = retry_after
+        super().__init__(_telegram_error_message(method, status_code, details))
 
 
 class TelegramClient:
@@ -29,7 +57,7 @@ class TelegramClient:
                 f"{config.chat_id_env} in your environment or .env file."
             )
 
-    def send_audio(self, audio_path: Path, caption: str | None = None) -> None:
+    def send_audio(self, audio_path: Path, caption: str | None = None) -> list[str]:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendAudio"
 
         def send_one(chat_id: str) -> None:
@@ -46,10 +74,9 @@ class TelegramClient:
                 )
             _raise_for_telegram_error(response, "sendAudio")
 
-        errors = _send_to_chat_ids(self.chat_ids, send_one, "sendAudio")
-        self._notify_admin_delivery_failure("sendAudio", errors)
+        return self._send_to_recipients("sendAudio", send_one)
 
-    def send_document(self, document_path: Path, caption: str | None = None) -> None:
+    def send_document(self, document_path: Path, caption: str | None = None) -> list[str]:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendDocument"
 
         def send_one(chat_id: str) -> None:
@@ -66,16 +93,13 @@ class TelegramClient:
                 )
             _raise_for_telegram_error(response, "sendDocument")
 
-        errors = _send_to_chat_ids(self.chat_ids, send_one, "sendDocument")
-        self._notify_admin_delivery_failure("sendDocument", errors)
+        return self._send_to_recipients("sendDocument", send_one)
 
-    def send_message(self, text: str, parse_mode: str | None = None) -> None:
-        errors = _send_to_chat_ids(
-            self.chat_ids,
-            lambda chat_id: self._send_message_to(chat_id, text, parse_mode=parse_mode),
+    def send_message(self, text: str, parse_mode: str | None = None) -> list[str]:
+        return self._send_to_recipients(
             "sendMessage",
+            lambda chat_id: self._send_message_to(chat_id, text, parse_mode=parse_mode),
         )
-        self._notify_admin_delivery_failure("sendMessage", errors)
 
     def send_admin_message(self, text: str, parse_mode: str | None = None) -> None:
         if not self.admin_chat_id:
@@ -115,6 +139,20 @@ class TelegramClient:
         except Exception:
             LOGGER.exception("Failed to send Telegram delivery failure admin alert.")
 
+    def _send_to_recipients(
+        self,
+        method: str,
+        send_one: Callable[[str], None],
+    ) -> list[str]:
+        try:
+            errors = _send_to_chat_ids(self.chat_ids, send_one, method)
+        except TelegramDeliveryError as exc:
+            self._notify_admin_delivery_failure(method, exc.errors)
+            raise
+
+        self._notify_admin_delivery_failure(method, errors)
+        return errors
+
     def get_updates(self) -> list[dict[str, Any]]:
         response = requests.get(
             f"https://api.telegram.org/bot{self.bot_token}/getUpdates",
@@ -139,17 +177,57 @@ def _send_to_chat_ids(
     send_one: Callable[[str], None],
     method: str,
 ) -> list[str]:
-    errors = []
+    failures: dict[str, str] = {}
+    pending_chat_ids = list(chat_ids)
     success_count = 0
-    for chat_id in chat_ids:
-        try:
-            send_one(chat_id)
-            success_count += 1
-        except Exception as exc:
-            errors.append(f"{chat_id}: {exc}")
+    total_attempts = MAX_RECIPIENT_RETRIES + 1
 
-    if not errors:
-        return []
+    for attempt in range(total_attempts):
+        retry_failures: dict[str, str] = {}
+        retry_after_seconds: int | None = None
+        for chat_id in pending_chat_ids:
+            try:
+                send_one(chat_id)
+                success_count += 1
+            except Exception as exc:
+                retry_failures[chat_id] = str(exc)
+                retry_after = _retry_after_from_exception(exc)
+                if retry_after is not None:
+                    retry_after_seconds = max(retry_after_seconds or 0, retry_after)
+
+        if not retry_failures:
+            return []
+
+        failures = retry_failures
+        pending_chat_ids = list(retry_failures)
+        attempt_number = attempt + 1
+        joined_failures = "; ".join(
+            f"{chat_id}: {error}" for chat_id, error in retry_failures.items()
+        )
+        if attempt < MAX_RECIPIENT_RETRIES:
+            delay_seconds = retry_after_seconds or DEFAULT_RETRY_DELAYS_SECONDS[attempt]
+            LOGGER.warning(
+                "Telegram %s failed for %s recipient(s); retrying failed recipient(s) "
+                "after %s second(s) (attempt %s/%s): %s",
+                method,
+                len(retry_failures),
+                delay_seconds,
+                attempt_number,
+                total_attempts,
+                joined_failures,
+            )
+            time.sleep(delay_seconds)
+        else:
+            LOGGER.warning(
+                "Telegram %s failed on final attempt %s/%s for %s recipient(s): %s",
+                method,
+                attempt_number,
+                total_attempts,
+                len(retry_failures),
+                joined_failures,
+            )
+
+    errors = [f"{chat_id}: {error}" for chat_id, error in failures.items()]
 
     joined_errors = "; ".join(errors)
     if success_count:
@@ -162,7 +240,13 @@ def _send_to_chat_ids(
         )
         return errors
 
-    raise RuntimeError(f"Telegram {method} failed for all recipient(s): {joined_errors}")
+    raise TelegramDeliveryError(method, errors)
+
+
+def _retry_after_from_exception(exc: Exception) -> int | None:
+    if isinstance(exc, TelegramApiError):
+        return exc.retry_after
+    return None
 
 
 def _now_text() -> str:
@@ -181,8 +265,31 @@ def _raise_for_telegram_error(response: requests.Response, method: str) -> None:
     except ValueError:
         details = response.text
 
+    retry_after = _retry_after_from_details(details)
+    raise TelegramApiError(method, response.status_code, details, retry_after=retry_after)
+
+
+def _retry_after_from_details(details: dict[str, Any] | str) -> int | None:
+    if not isinstance(details, dict):
+        return None
+
+    parameters = details.get("parameters")
+    if not isinstance(parameters, dict):
+        return None
+
+    retry_after = parameters.get("retry_after")
+    if isinstance(retry_after, int):
+        return retry_after
+    return None
+
+
+def _telegram_error_message(
+    method: str,
+    status_code: int,
+    details: dict[str, Any] | str,
+) -> str:
     hint = ""
-    if response.status_code == 403:
+    if status_code == 403:
         description = ""
         if isinstance(details, dict):
             description = str(details.get("description", ""))
@@ -198,4 +305,4 @@ def _raise_for_telegram_error(response: requests.Response, method: str) -> None:
                 "and make sure TELEGRAM_CHAT_ID belongs to that chat. "
                 "If this token was exposed, revoke it with BotFather and create a new one."
             )
-    raise RuntimeError(f"Telegram {method} failed: HTTP {response.status_code} {details}.{hint}")
+    return f"Telegram {method} failed: HTTP {status_code} {details}.{hint}"
