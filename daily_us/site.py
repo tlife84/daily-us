@@ -808,7 +808,10 @@ def _extract_post_body_text(page: Page) -> str:
             const className = child.className || '';
             if (typeof className === 'string' && className.includes('node-callout')) {
               if (hasStarted && !hasMeaningfulContentAfter(index)) {
-                break;
+                const calloutText = normalizeText(child.innerText || child.textContent || '');
+                if (!calloutText || calloutText.includes('투자 유의사항') || calloutText.includes('유사투자자문')) {
+                  break;
+                }
               }
             }
             if (typeof className === 'string' && className.includes('node-imageBlock')) {
