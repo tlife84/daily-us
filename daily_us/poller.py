@@ -54,6 +54,7 @@ def send_latest_for_test(
     config: AppConfig,
     watcher_name: str | None = None,
     limit: int = 1,
+    admin_only: bool = False,
 ) -> None:
     telegram = TelegramClient(config.telegram)
     watchers = [
@@ -67,13 +68,14 @@ def send_latest_for_test(
 
     with UsInsightClient(config.site) as client:
         for watcher in watchers:
-            _process_latest_for_test(client, telegram, config, watcher, limit)
+            _process_latest_for_test(client, telegram, config, watcher, limit, admin_only)
 
 
 def send_latest_body_for_test(
     config: AppConfig,
     watcher_name: str | None = None,
     limit: int = 1,
+    admin_only: bool = False,
 ) -> None:
     telegram = TelegramClient(config.telegram)
     watchers = [
@@ -87,7 +89,7 @@ def send_latest_body_for_test(
 
     with UsInsightClient(config.site) as client:
         for watcher in watchers:
-            _process_latest_body_for_test(client, telegram, watcher, limit)
+            _process_latest_body_for_test(client, telegram, watcher, limit, admin_only)
 
 
 def seed_seen_posts(
@@ -395,6 +397,7 @@ def _process_latest_for_test(
     config: AppConfig,
     watcher: WatcherConfig,
     limit: int,
+    admin_only: bool = False,
 ) -> None:
     LOGGER.info("Checking latest %s test post(s) for watcher: %s", limit, watcher.name)
     posts = client.find_posts(watcher.title_contains, limit)
@@ -413,7 +416,9 @@ def _process_latest_for_test(
 
             documents_sent = True
             if content.pdf_paths:
-                documents_sent = _send_documents(telegram, content.pdf_paths, post.title)
+                documents_sent = _send_documents(
+                    telegram, content.pdf_paths, post.title, admin_only=admin_only
+                )
             else:
                 LOGGER.warning(
                     "No PDF attachment found for latest test post; sending body only: %s",
@@ -422,7 +427,9 @@ def _process_latest_for_test(
 
             body_sent = False
             if documents_sent:
-                body_sent = _send_body_messages(telegram, content.body_text, post.title)
+                body_sent = _send_body_messages(
+                    telegram, content.body_text, post.title, admin_only=admin_only
+                )
 
             if body_sent and documents_sent:
                 LOGGER.info(
@@ -442,7 +449,7 @@ def _process_latest_for_test(
 
         if not watcher.send_audio:
             body_text = client.fetch_post_body_text(post)
-            if _send_body_messages(telegram, body_text, post.title):
+            if _send_body_messages(telegram, body_text, post.title, admin_only=admin_only):
                 LOGGER.info(
                     "Sent latest body-only test post %s/%s to Telegram: %s",
                     index,
@@ -468,8 +475,8 @@ def _process_latest_for_test(
             LOGGER.info("Audio is not available yet for latest test post: %s", post.title)
             continue
         audio_caption = audio.path.stem
-        telegram.send_audio(audio.path, audio_caption)
-        _send_body_messages(telegram, audio.body_text, post.title)
+        telegram.send_audio(audio.path, audio_caption, admin_only=admin_only)
+        _send_body_messages(telegram, audio.body_text, post.title, admin_only=admin_only)
         LOGGER.info(
             "Sent latest test post %s/%s to Telegram without marking seen: %s",
             index,
@@ -483,6 +490,7 @@ def _process_latest_body_for_test(
     telegram: TelegramClient,
     watcher: WatcherConfig,
     limit: int,
+    admin_only: bool = False,
 ) -> None:
     LOGGER.info("Checking latest %s body-only test post(s) for watcher: %s", limit, watcher.name)
     posts = client.find_posts(watcher.title_contains, limit)
@@ -493,7 +501,7 @@ def _process_latest_body_for_test(
 
     for index, post in enumerate(posts, start=1):
         body_text = client.fetch_post_body_text(post)
-        if _send_body_messages(telegram, body_text, post.title):
+        if _send_body_messages(telegram, body_text, post.title, admin_only=admin_only):
             LOGGER.info(
                 "Sent latest body-only test post %s/%s to Telegram: %s",
                 index,
@@ -509,20 +517,30 @@ def _process_latest_body_for_test(
             )
 
 
-def _send_body_messages(telegram: TelegramClient, body_text: str, post_title: str) -> bool:
+def _send_body_messages(
+    telegram: TelegramClient,
+    body_text: str,
+    post_title: str,
+    admin_only: bool = False,
+) -> bool:
     try:
         for message in _telegram_body_messages(body_text):
-            telegram.send_message(message, parse_mode="MarkdownV2")
+            telegram.send_message(message, parse_mode="MarkdownV2", admin_only=admin_only)
     except Exception:
         LOGGER.exception("Body message failed for post: %s", post_title)
         return False
     return True
 
 
-def _send_documents(telegram: TelegramClient, paths: list[Path], post_title: str) -> bool:
+def _send_documents(
+    telegram: TelegramClient,
+    paths: list[Path],
+    post_title: str,
+    admin_only: bool = False,
+) -> bool:
     try:
         for path in paths:
-            telegram.send_document(path)
+            telegram.send_document(path, admin_only=admin_only)
     except Exception:
         LOGGER.exception("Document send failed for post: %s", post_title)
         return False

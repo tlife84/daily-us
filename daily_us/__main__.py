@@ -60,6 +60,11 @@ def main() -> None:
         default=1,
         help="Number of recent matching posts to test. Defaults to 1.",
     )
+    test_latest_parser.add_argument(
+        "--admin",
+        action="store_true",
+        help="Send only to the admin chat instead of the normal recipients.",
+    )
     test_latest_body_parser = subparsers.add_parser(
         "test-latest-body",
         help="Send only the newest matching post body without audio or seen history.",
@@ -73,6 +78,11 @@ def main() -> None:
         type=_positive_int,
         default=1,
         help="Number of recent matching posts to test. Defaults to 1.",
+    )
+    test_latest_body_parser.add_argument(
+        "--admin",
+        action="store_true",
+        help="Send only to the admin chat instead of the normal recipients.",
     )
     poll_parser = subparsers.add_parser("poll", help="Run one poll immediately, ignoring active hours.")
     poll_parser.add_argument(
@@ -153,9 +163,19 @@ def main() -> None:
         )
         print("Telegram MarkdownV2 test message sent.")
     elif args.command == "test-latest":
-        send_latest_for_test(config, watcher_name=args.watcher, limit=args.limit)
+        send_latest_for_test(
+            config,
+            watcher_name=args.watcher,
+            limit=args.limit,
+            admin_only=args.admin,
+        )
     elif args.command == "test-latest-body":
-        send_latest_body_for_test(config, watcher_name=args.watcher, limit=args.limit)
+        send_latest_body_for_test(
+            config,
+            watcher_name=args.watcher,
+            limit=args.limit,
+            admin_only=args.admin,
+        )
     elif args.command == "poll":
         poll_once(config, ignore_schedule=True, watcher_name=args.watcher)
     elif args.command == "seed-seen":

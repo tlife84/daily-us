@@ -170,6 +170,14 @@ python -m daily_us test-latest-body --watcher always_date
 python -m daily_us test-latest-body --watcher always_date --limit 3
 ```
 
+본문 테스트를 admin 채팅에만 보내기 (일반 수신자에게는 전송하지 않음):
+
+```bash
+python -m daily_us test-latest-body --watcher good_morning_damsaem --admin
+```
+
+`--admin`을 붙이면 `test-latest-body`가 본문을 `TELEGRAM_ADMIN_CHAT_ID`로만 보냅니다. 일반 수신자(`TELEGRAM_CHAT_ID`, `TELEGRAM_CHAT_IDS`)에게는 전송하지 않으므로, 실제 게시글 본문 렌더링을 다른 사람을 방해하지 않고 혼자 확인할 때 유용합니다.
+
 `--limit`은 최근 매칭 게시글을 몇 개 보낼지 정합니다. 생략하면 1개만 보냅니다. `test-latest`와 `test-latest-body`는 `seen.sqlite3`를 읽거나 쓰지 않습니다.
 
 본문 메시지는 텔레그램 `MarkdownV2` 형식으로 전송합니다. 본문 안의 일반 텍스트 특수문자는 텔레그램 문법 오류가 나지 않도록 자동으로 이스케이프합니다.

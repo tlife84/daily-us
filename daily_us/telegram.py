@@ -57,7 +57,12 @@ class TelegramClient:
                 f"{config.chat_id_env} in your environment or .env file."
             )
 
-    def send_audio(self, audio_path: Path, caption: str | None = None) -> list[str]:
+    def send_audio(
+        self,
+        audio_path: Path,
+        caption: str | None = None,
+        admin_only: bool = False,
+    ) -> list[str]:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendAudio"
 
         def send_one(chat_id: str) -> None:
@@ -74,9 +79,14 @@ class TelegramClient:
                 )
             _raise_for_telegram_error(response, "sendAudio")
 
-        return self._send_to_recipients("sendAudio", send_one)
+        return self._send_to_recipients("sendAudio", send_one, admin_only=admin_only)
 
-    def send_document(self, document_path: Path, caption: str | None = None) -> list[str]:
+    def send_document(
+        self,
+        document_path: Path,
+        caption: str | None = None,
+        admin_only: bool = False,
+    ) -> list[str]:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendDocument"
 
         def send_one(chat_id: str) -> None:
@@ -93,12 +103,18 @@ class TelegramClient:
                 )
             _raise_for_telegram_error(response, "sendDocument")
 
-        return self._send_to_recipients("sendDocument", send_one)
+        return self._send_to_recipients("sendDocument", send_one, admin_only=admin_only)
 
-    def send_message(self, text: str, parse_mode: str | None = None) -> list[str]:
+    def send_message(
+        self,
+        text: str,
+        parse_mode: str | None = None,
+        admin_only: bool = False,
+    ) -> list[str]:
         return self._send_to_recipients(
             "sendMessage",
             lambda chat_id: self._send_message_to(chat_id, text, parse_mode=parse_mode),
+            admin_only=admin_only,
         )
 
     def send_admin_message(self, text: str, parse_mode: str | None = None) -> None:
@@ -139,13 +155,22 @@ class TelegramClient:
         except Exception:
             LOGGER.exception("Failed to send Telegram delivery failure admin alert.")
 
+    def _recipients(self, admin_only: bool) -> tuple[str, ...]:
+        if not admin_only:
+            return self.chat_ids
+        if not self.admin_chat_id:
+            raise RuntimeError("Set the admin Telegram chat id environment variable.")
+        return (self.admin_chat_id,)
+
     def _send_to_recipients(
         self,
         method: str,
         send_one: Callable[[str], None],
+        admin_only: bool = False,
     ) -> list[str]:
+        recipients = self._recipients(admin_only)
         try:
-            errors = _send_to_chat_ids(self.chat_ids, send_one, method)
+            errors = _send_to_chat_ids(recipients, send_one, method)
         except TelegramDeliveryError as exc:
             self._notify_admin_delivery_failure(method, exc.errors)
             raise
