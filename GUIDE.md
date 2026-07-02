@@ -287,85 +287,53 @@ Start-ScheduledTask -TaskName "daily-us good morning"
 
 ## 7. macOS 스케줄러 등록
 
-macOS에서는 `launchd`를 권장합니다. 간단히 쓰려면 `cron`도 가능합니다.
+macOS에서는 `launchd` LaunchAgent를 권장합니다. `cron`은 잠자기 중 놓친 실행을 아예 건너뛰지만, launchd는 깨어날 때 놓친 시각들을 1회로 합쳐 즉시 실행해 줍니다(Windows의 StartWhenAvailable 대응).
 
-### launchd 권장
+### 스크립트로 설치 (권장)
 
-아래 파일을 만듭니다.
-
-```bash
-nano ~/Library/LaunchAgents/com.daily-us.goodmorning.plist
-```
-
-내용:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.daily-us.goodmorning</string>
-
-  <key>WorkingDirectory</key>
-  <string>/path/to/daily-us</string>
-
-  <key>ProgramArguments</key>
-  <array>
-    <string>/path/to/daily-us/.venv/bin/python</string>
-    <string>-m</string>
-    <string>daily_us</string>
-    <string>poll</string>
-    <string>--watcher</string>
-    <string>good_morning_damsaem</string>
-  </array>
-
-  <key>StartCalendarInterval</key>
-  <array>
-    <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>10</integer></dict>
-    <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>20</integer></dict>
-    <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>30</integer></dict>
-    <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>40</integer></dict>
-    <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>50</integer></dict>
-    <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>10</integer></dict>
-    <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>20</integer></dict>
-    <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>30</integer></dict>
-    <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>40</integer></dict>
-    <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>50</integer></dict>
-    <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>10</integer></dict>
-  </array>
-
-  <key>StandardOutPath</key>
-  <string>/path/to/daily-us/daily-us.log</string>
-  <key>StandardErrorPath</key>
-  <string>/path/to/daily-us/daily-us.err.log</string>
-</dict>
-</plist>
-```
-
-`/path/to/daily-us`는 실제 경로로 바꿉니다.
-
-등록:
+레포에 포함된 스크립트가 `config.yaml`의 스케줄과 동일한 고정 시각 트리거로 LaunchAgent 3개를 생성하고 등록합니다. 레포를 클론하고 `.venv`를 만든 뒤 실행합니다.
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.daily-us.goodmorning.plist
+bash scripts/macos/install-launch-agents.sh
 ```
 
-수동 실행:
+- plist 생성 위치: `~/Library/LaunchAgents/com.daily-us.*.plist` (경로는 레포 위치에서 자동 계산)
+- 실행 래퍼: [scripts/macos/poll-watcher.sh](scripts/macos/poll-watcher.sh) — 시작/종료 로그, 복귀 직후 네트워크 대기(최대 90초), 실행 시간 제한(굿모닝 9분, 나머지 50분)을 처리합니다.
+- 로그: `logs/good-morning.log`, `logs/always-date.log`, `logs/company-analysis-guide.log` (launchd 자체 오류는 `logs/launchd-*.log`)
+
+### 자동 코드 갱신 (git pull)
+
+집에서 푸시한 코드를 회사 Mac이 자동으로 받도록, `poll-watcher.sh`가 매 폴링 전에 `git pull --ff-only`를 실행합니다.
+
+- 같은 시각에 여러 watcher가 떠도 잠금으로 한 작업만 pull하고, 나머지는 기존 코드로 바로 실행합니다.
+- pull이 실패하면(네트워크 없음, 브랜치 분기 등) 로그에 남기고 기존 코드로 폴링을 진행합니다.
+- pull로 `requirements.txt`가 바뀌면 `pip install -r requirements.txt`와 `playwright install chromium`을 자동 실행합니다.
+- pull로 `install-launch-agents.sh`나 `config.yaml`(스케줄)이 바뀌면 로그에 `NOTICE: schedule changed`를 남깁니다. 이때는 Mac에서 `bash scripts/macos/install-launch-agents.sh`를 한 번 다시 실행해 트리거를 갱신해야 합니다.
+
+사전 조건: Mac에서 `git pull`이 인증 프롬프트 없이 동작해야 합니다(SSH 키 등록 또는 credential helper 저장). 클론 후 `git pull`을 한 번 수동 실행해서 비밀번호를 묻지 않는지 확인하세요. 또한 추적 파일을 로컬에서 수정하면 pull이 계속 실패하므로, Mac 쪽에서는 코드를 직접 고치지 않는 것을 전제로 합니다(`.env`, `data/`, `logs/`는 gitignore라 무관).
+
+수동 실행 테스트:
 
 ```bash
-launchctl start com.daily-us.goodmorning
+launchctl kickstart "gui/$(id -u)/com.daily-us.always-date"
 ```
 
 해제:
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.daily-us.goodmorning.plist
+bash scripts/macos/uninstall-launch-agents.sh
 ```
+
+### 잠자기 주의사항
+
+launchd도 잠든 Mac을 깨우지는 못합니다. 뚜껑이 닫혀 완전히 잠들면 그 시각의 실행은 건너뛰고, 깨어날 때 놓친 실행이 1회 합쳐져 즉시 실행됩니다. 전원 어댑터 연결 + Power Nap 환경에서는 주기적인 dark wake 중에 실행되는 경우가 많아 실사용에서는 크게 밀리지 않습니다. 아침 첫 실행(07:00)을 정시에 보장하고 싶다면 깨우기를 예약할 수 있습니다.
+
+```bash
+# 매일 06:58에 깨우기 (관리자 권한 필요, 규칙 1개만 지원)
+sudo pmset repeat wakeorpoweron MTWRFSU 06:58:00
+```
+
+시간별 정시 실행까지 전부 보장해야 한다면 전원 연결 시 잠자기를 끄는 편이 간단합니다: `sudo pmset -c sleep 0`
 
 ### cron 간단 버전
 
