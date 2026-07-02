@@ -14,6 +14,8 @@ from daily_us.telegram import TelegramClient
 LOGGER = logging.getLogger(__name__)
 DEFAULT_SEED_LIMIT = 100
 LOGIN_ALERT_COOLDOWN_MINUTES = 60
+ADMIN_ALERT_RETRY_INTERVAL_SECONDS = 600
+ADMIN_ALERT_MAX_ATTEMPTS = 6
 
 
 def poll_once(
@@ -328,11 +330,7 @@ def _notify_login_required(
         "python -m daily_us check-login\n\n"
         f"오류: {exc}"
     )
-    try:
-        telegram.send_admin_message(message)
-        LOGGER.info("Sent login-required admin alert.")
-    except Exception:
-        LOGGER.exception("Failed to send login-required admin alert.")
+    _send_admin_alert_with_retry(telegram, message, "login-required")
 
 
 def _notify_poll_failure(
@@ -360,11 +358,35 @@ def _notify_poll_failure(
     if exc:
         lines.extend(["", f"오류: {type(exc).__name__}: {exc}"])
 
-    try:
-        telegram.send_admin_message("\n".join(lines))
-        LOGGER.info("Sent poll failure admin alert.")
-    except Exception:
-        LOGGER.exception("Failed to send poll failure admin alert.")
+    _send_admin_alert_with_retry(telegram, "\n".join(lines), "poll failure")
+
+
+def _send_admin_alert_with_retry(
+    telegram: TelegramClient,
+    message: str,
+    context: str,
+) -> bool:
+    for attempt in range(1, ADMIN_ALERT_MAX_ATTEMPTS + 1):
+        try:
+            telegram.send_admin_message(message)
+            LOGGER.info("Sent %s admin alert on attempt %s.", context, attempt)
+            return True
+        except Exception:
+            LOGGER.exception(
+                "Failed to send %s admin alert (attempt %s/%s).",
+                context,
+                attempt,
+                ADMIN_ALERT_MAX_ATTEMPTS,
+            )
+        if attempt < ADMIN_ALERT_MAX_ATTEMPTS:
+            time_module.sleep(ADMIN_ALERT_RETRY_INTERVAL_SECONDS)
+
+    LOGGER.error(
+        "Giving up on %s admin alert after %s attempt(s).",
+        context,
+        ADMIN_ALERT_MAX_ATTEMPTS,
+    )
+    return False
 
 
 def _process_latest_for_test(
