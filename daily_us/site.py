@@ -6,6 +6,7 @@ import re
 import subprocess
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import unquote, urljoin, urlparse
@@ -25,6 +26,9 @@ from playwright.sync_api import (
 from daily_us.config import SiteConfig
 
 LOGGER = logging.getLogger(__name__)
+
+REFRESH_TOKEN_COOKIE = "us_refreshToken"
+TOKEN_EXPIRY_WARNING_DAYS = 3
 
 
 @dataclass(frozen=True)
@@ -71,8 +75,9 @@ class UsInsightClient:
             "viewport": {"width": 1366, "height": 900},
             "accept_downloads": True,
         }
-        if self.config.auth_state_path.exists():
-            context_options["storage_state"] = str(self.config.auth_state_path)
+        auth_state = self._load_saved_auth_state()
+        if auth_state is not None:
+            context_options["storage_state"] = auth_state
 
         self.context = self.browser.new_context(**context_options)
         self._restore_session_storage()
@@ -129,6 +134,7 @@ class UsInsightClient:
                 )
             posts = self._extract_post_links(page, title_contains, max_posts)
             LOGGER.info("Found %s candidate posts for title filter %r", len(posts), title_contains)
+            self._refresh_saved_session(page)
             return posts
         finally:
             page.close()
@@ -485,6 +491,8 @@ class UsInsightClient:
             verified = is_feed and not self._is_logged_out(page)
             if verified and save_state:
                 self._save_auth_state(page)
+            if verified:
+                self._log_session_expiry()
             return verified, page.url
         finally:
             page.close()
@@ -514,12 +522,73 @@ class UsInsightClient:
 
         return "계정으로 로그인" in body and "비밀번호 찾기" in body
 
+    def _refresh_saved_session(self, page: Page) -> None:
+        try:
+            self._save_auth_state(page)
+            LOGGER.info("Refreshed saved login session state.")
+        except Exception:
+            LOGGER.exception("Could not refresh the saved login session state.")
+            return
+        self._log_session_expiry()
+
+    def _log_session_expiry(self) -> None:
+        if not self.context:
+            return
+
+        try:
+            cookies = {
+                cookie["name"]: cookie
+                for cookie in self.context.cookies([self.config.feed_url])
+            }
+        except Exception:
+            LOGGER.exception("Could not read cookies while checking session expiry.")
+            return
+
+        refresh_cookie = cookies.get(REFRESH_TOKEN_COOKIE)
+        expires = float(refresh_cookie.get("expires", -1)) if refresh_cookie else -1.0
+        if expires <= 0:
+            LOGGER.warning(
+                "Saved session has no %s expiry; login may be required soon.",
+                REFRESH_TOKEN_COOKIE,
+            )
+            return
+
+        expires_at = datetime.fromtimestamp(expires)
+        remaining = expires_at - datetime.now()
+        remaining_days = remaining.total_seconds() / 86400
+        if remaining <= timedelta(days=TOKEN_EXPIRY_WARNING_DAYS):
+            LOGGER.warning(
+                "Login refresh token expires soon: %s (%.1f day(s) left). "
+                "Run `python -m daily_us login` before it expires.",
+                expires_at.strftime("%Y-%m-%d %H:%M:%S"),
+                remaining_days,
+            )
+        else:
+            LOGGER.info(
+                "Login refresh token expires at %s (%.1f day(s) left).",
+                expires_at.strftime("%Y-%m-%d %H:%M:%S"),
+                remaining_days,
+            )
+
+    def _load_saved_auth_state(self) -> dict | None:
+        if not self.config.auth_state_path.exists():
+            return None
+
+        try:
+            return json.loads(self.config.auth_state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            LOGGER.warning(
+                "Saved auth state file is unreadable or corrupted; starting without it: %s",
+                self.config.auth_state_path,
+            )
+            return None
+
     def _save_auth_state(self, page: Page) -> None:
         if not self.context:
             raise RuntimeError("Browser context is not open.")
 
-        self.config.auth_state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.context.storage_state(path=str(self.config.auth_state_path))
+        state = self.context.storage_state()
+        _write_json_atomically(self.config.auth_state_path, state)
 
         origin = page.evaluate("() => window.location.origin")
         session_storage = page.evaluate(
@@ -534,18 +603,21 @@ class UsInsightClient:
             }
             """
         )
-        self.config.session_storage_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config.session_storage_path.write_text(
-            json.dumps({origin: session_storage}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _write_json_atomically(self.config.session_storage_path, {origin: session_storage})
 
     def _restore_session_storage(self) -> None:
         if not self.context or not self.config.session_storage_path.exists():
             return
 
-        raw = self.config.session_storage_path.read_text(encoding="utf-8")
-        storage_by_origin = json.loads(raw)
+        try:
+            raw = self.config.session_storage_path.read_text(encoding="utf-8")
+            storage_by_origin = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            LOGGER.warning(
+                "Saved session storage file is unreadable or corrupted; ignoring it: %s",
+                self.config.session_storage_path,
+            )
+            return
         script = f"""
         (() => {{
           const storageByOrigin = {json.dumps(storage_by_origin, ensure_ascii=False)};
@@ -557,6 +629,16 @@ class UsInsightClient:
         }})();
         """
         self.context.add_init_script(script=script)
+
+
+def _write_json_atomically(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.tmp")
+    temp_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temp_path.replace(path)
 
 
 def _looks_like_audio_response(response: Response) -> bool:
