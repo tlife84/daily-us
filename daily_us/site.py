@@ -38,6 +38,13 @@ class PostRef:
 class DownloadedAudio:
     path: Path
     body_text: str
+    body_ready: bool = True
+
+
+@dataclass(frozen=True)
+class PostBody:
+    text: str
+    is_ready: bool
 
 
 @dataclass(frozen=True)
@@ -173,19 +180,26 @@ class UsInsightClient:
                 referer_url=post.url,
                 user_agent=user_agent,
             )
-            body_text = _extract_post_body_text(page) or _escape_markdown_v2(post.title)
-            return DownloadedAudio(path=audio_path, body_text=body_text)
+            body = _post_body_from_page(page, post)
+            return DownloadedAudio(
+                path=audio_path,
+                body_text=body.text,
+                body_ready=body.is_ready,
+            )
         finally:
             page.close()
 
     def fetch_post_body_text(self, post: PostRef) -> str:
+        return self.fetch_post_body(post).text
+
+    def fetch_post_body(self, post: PostRef) -> PostBody:
         page = self._new_page()
         try:
             LOGGER.info("Opening post for body text: %s", post.url)
             self._goto(page, post.url)
             self._wait_for_network_idle(page)
             self._wait_for_page_settle(page)
-            return _extract_post_body_text(page) or _escape_markdown_v2(post.title)
+            return _post_body_from_page(page, post)
         finally:
             page.close()
 
@@ -627,6 +641,22 @@ def _extract_pdf_items(payloads: list[dict[str, object]]) -> list[dict[str, str]
     return _dedupe_pdf_items(pdf_items)
 
 
+def _post_body_from_page(page: Page, post: PostRef) -> PostBody:
+    body_text = _extract_post_body_text(page)
+    is_ready = _is_post_body_ready(body_text)
+    return PostBody(
+        text=body_text or _escape_markdown_v2(post.title),
+        is_ready=is_ready,
+    )
+
+
+def _is_post_body_ready(body_text: str) -> bool:
+    normalized = _normalize_text(body_text)
+    if not normalized:
+        return False
+    return re.search(r"스크립트\s*준비\s*중", normalized) is None
+
+
 def _extract_post_body_text(page: Page) -> str:
     body_markdown = page.evaluate(
         """
@@ -842,9 +872,12 @@ def _extract_post_body_text_fallback(page: Page) -> str:
     lines = [_normalize_text(line) for line in raw_text.splitlines()]
     lines = [line for line in lines if line]
 
+    if any(re.search(r"스크립트\s*준비\s*중", line) for line in lines):
+        return ""
+
     start_index = 0
     for index, line in enumerate(lines):
-        if line == "Beta" or "스크립트 준비중" in line:
+        if line == "Beta":
             start_index = index + 1
             break
 
