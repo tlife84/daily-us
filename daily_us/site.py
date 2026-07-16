@@ -654,7 +654,11 @@ def _is_post_body_ready(body_text: str) -> bool:
     normalized = _normalize_text(body_text)
     if not normalized:
         return False
-    return re.search(r"스크립트\s*준비\s*중", normalized) is None
+    return not _is_script_preparing_marker(normalized)
+
+
+def _is_script_preparing_marker(value: str) -> bool:
+    return re.fullmatch(r"스크립트\s*준비\s*중", _normalize_text(value)) is not None
 
 
 def _extract_post_body_text(page: Page) -> str:
@@ -872,12 +876,14 @@ def _extract_post_body_text_fallback(page: Page) -> str:
     lines = [_normalize_text(line) for line in raw_text.splitlines()]
     lines = [line for line in lines if line]
 
-    if any(re.search(r"스크립트\s*준비\s*중", line) for line in lines):
-        return ""
-
     start_index = 0
     for index, line in enumerate(lines):
         if line == "Beta":
+            start_index = index + 1
+            break
+
+    for index in range(start_index, len(lines)):
+        if _is_script_preparing_marker(lines[index]):
             start_index = index + 1
             break
 

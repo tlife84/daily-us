@@ -254,12 +254,22 @@ class AudioDeliveryTest(unittest.TestCase):
         self.assertFalse(_is_post_body_ready(""))
         self.assertFalse(_is_post_body_ready("스크립트 준비 중"))
         self.assertTrue(_is_post_body_ready("실제 본문"))
+        self.assertTrue(_is_post_body_ready("스크립트 준비중 문구를 설명하는 실제 본문"))
 
         page = Mock()
         page.locator.return_value.inner_text.return_value = (
             "Beta\n스크립트 준비중\n투자 유의사항 펼치기"
         )
         self.assertEqual(_extract_post_body_text_fallback(page), "")
+
+        page.locator.return_value.inner_text.return_value = (
+            "Beta\n스크립트 준비중\n실제 본문 첫 줄\n실제 본문 둘째 줄\n"
+            "투자 유의사항 펼치기"
+        )
+        self.assertEqual(
+            _extract_post_body_text_fallback(page),
+            "실제 본문 첫 줄\n실제 본문 둘째 줄",
+        )
 
 
 if __name__ == "__main__":
