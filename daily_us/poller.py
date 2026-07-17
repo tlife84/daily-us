@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import time as time_module
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -308,8 +309,50 @@ def _process_audio_post(
     post: PostRef,
 ) -> None:
     status = store.get_delivery_status(watcher.name, post.post_id)
-    body_sent = status.body_sent
-    audio_sent = status.audio_sent
+    body_sent, audio_sent, failures = _deliver_audio_post(
+        client,
+        telegram,
+        config,
+        watcher,
+        post,
+        body_sent=status.body_sent,
+        audio_sent=status.audio_sent,
+        on_body_sent=lambda: store.mark_body_sent(
+            watcher.name, post.post_id, post.title, post.url
+        ),
+        on_audio_sent=lambda: store.mark_audio_sent(
+            watcher.name, post.post_id, post.title, post.url
+        ),
+    )
+
+    if body_sent and audio_sent:
+        store.mark_seen(watcher.name, post.post_id, post.title, post.url)
+        LOGGER.info("Completed body and audio delivery: %s", post.title)
+
+    for summary, exc in failures:
+        _notify_poll_failure_with_cooldown(
+            telegram,
+            store,
+            watcher.name,
+            summary,
+            exc,
+            post,
+        )
+
+
+def _deliver_audio_post(
+    client: UsInsightClient,
+    telegram: TelegramClient,
+    config: AppConfig,
+    watcher: WatcherConfig,
+    post: PostRef,
+    *,
+    body_sent: bool = False,
+    audio_sent: bool = False,
+    admin_only: bool = False,
+    on_body_sent: Callable[[], None] | None = None,
+    on_audio_sent: Callable[[], None] | None = None,
+) -> tuple[bool, bool, list[tuple[str, Exception | None]]]:
     audio = None
     failures: list[tuple[str, Exception | None]] = []
 
@@ -345,8 +388,9 @@ def _process_audio_post(
         if body_text is not None:
             if not body_ready:
                 LOGGER.info("Body is not ready yet; will retry without marking sent: %s", post.title)
-            elif _send_body_messages(telegram, body_text, post.title):
-                store.mark_body_sent(watcher.name, post.post_id, post.title, post.url)
+            elif _send_body_messages(telegram, body_text, post.title, admin_only=admin_only):
+                if on_body_sent:
+                    on_body_sent()
                 body_sent = True
                 LOGGER.info("Sent body to Telegram: %s", post.title)
             else:
@@ -354,28 +398,17 @@ def _process_audio_post(
 
     if not audio_sent and audio is not None:
         try:
-            telegram.send_audio(audio.path, audio.path.stem)
+            telegram.send_audio(audio.path, audio.path.stem, admin_only=admin_only)
         except Exception as exc:
             LOGGER.exception("Failed to send audio for post: %s", post.title)
             failures.append(("failed to send audio", exc))
         else:
-            store.mark_audio_sent(watcher.name, post.post_id, post.title, post.url)
+            if on_audio_sent:
+                on_audio_sent()
             audio_sent = True
             LOGGER.info("Sent audio to Telegram: %s", post.title)
 
-    if body_sent and audio_sent:
-        store.mark_seen(watcher.name, post.post_id, post.title, post.url)
-        LOGGER.info("Completed body and audio delivery: %s", post.title)
-
-    for summary, exc in failures:
-        _notify_poll_failure_with_cooldown(
-            telegram,
-            store,
-            watcher.name,
-            summary,
-            exc,
-            post,
-        )
+    return body_sent, audio_sent, failures
 
 
 def _notify_login_required(
@@ -557,42 +590,17 @@ def _process_latest_for_test(
                 )
             continue
 
-        audio = None
-        try:
-            audio = client.download_audio_from_post(
-                post,
-                config.storage.download_dir,
-                watcher.audio_filename_template,
-            )
-        except AudioNotAvailableYet:
-            LOGGER.info("Audio is not available yet for latest test post: %s", post.title)
-        except Exception:
-            LOGGER.exception("Failed to fetch audio for latest test post: %s", post.title)
-
-        body_text: str | None = None
-        body_ready = False
-        if audio is not None:
-            body_text = audio.body_text
-            body_ready = audio.body_ready
-        else:
-            try:
-                body = client.fetch_post_body(post)
-            except Exception:
-                LOGGER.exception("Failed to fetch body for latest test post: %s", post.title)
-            else:
-                body_text = body.text
-                body_ready = body.is_ready
-
-        sent_parts = []
-        if body_text is not None and body_ready:
-            if _send_body_messages(telegram, body_text, post.title, admin_only=admin_only):
-                sent_parts.append("body")
-        elif body_text is not None:
-            LOGGER.info("Body is not ready yet for latest test post: %s", post.title)
-
-        if audio is not None:
-            telegram.send_audio(audio.path, audio.path.stem, admin_only=admin_only)
-            sent_parts.append("audio")
+        body_sent, audio_sent, _failures = _deliver_audio_post(
+            client,
+            telegram,
+            config,
+            watcher,
+            post,
+            admin_only=admin_only,
+        )
+        sent_parts = [
+            part for part, sent in (("body", body_sent), ("audio", audio_sent)) if sent
+        ]
         if sent_parts:
             LOGGER.info(
                 "Sent latest test post %s/%s parts=%s without marking seen: %s",

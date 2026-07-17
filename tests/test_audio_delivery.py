@@ -87,7 +87,9 @@ class AudioDeliveryTest(unittest.TestCase):
 
         client.fetch_post_body.assert_not_called()
         self.telegram.send_message.assert_called_once()
-        self.telegram.send_audio.assert_called_once_with(audio_path, audio_path.stem)
+        self.telegram.send_audio.assert_called_once_with(
+            audio_path, audio_path.stem, admin_only=False
+        )
         self.assertTrue(self.store.has_seen(self.watcher.name, post.post_id))
         self.assertEqual(
             self.store.get_delivery_status(self.watcher.name, post.post_id).body_sent,
@@ -131,7 +133,9 @@ class AudioDeliveryTest(unittest.TestCase):
         _process_watcher(client, self.store, self.telegram, self.config, self.watcher)
         _process_watcher(client, self.store, self.telegram, self.config, self.watcher)
 
-        self.telegram.send_audio.assert_called_once_with(audio_path, audio_path.stem)
+        self.telegram.send_audio.assert_called_once_with(
+            audio_path, audio_path.stem, admin_only=False
+        )
         self.telegram.send_admin_message.assert_called_once()
         self.assertEqual(
             [call[0] for call in self.telegram.method_calls[:3]],
