@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import time as time_module
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from daily_us.telegram import TelegramClient
 LOGGER = logging.getLogger(__name__)
 DEFAULT_SEED_LIMIT = 100
 LOGIN_ALERT_COOLDOWN_MINUTES = 60
+POLL_FAILURE_ALERT_COOLDOWN_MINUTES = 60
 ADMIN_ALERT_RETRY_INTERVAL_SECONDS = 600
 ADMIN_ALERT_MAX_ATTEMPTS = 6
 
@@ -219,7 +221,7 @@ def _process_watcher(
 ) -> None:
     LOGGER.info("Checking watcher: %s", watcher.name)
     posts = client.find_posts(watcher.title_contains, watcher.max_posts_per_poll)
-    _mark_prior_posts_seen_if_today_exists(store, watcher, posts)
+    _mark_prior_posts_seen(store, watcher, posts)
     posts = _filter_excluded_posts(watcher, posts)
     posts = _filter_posts_for_watcher(watcher, posts)
 
@@ -274,6 +276,14 @@ def _process_watcher(
             continue
 
         if not watcher.send_audio:
+            status = store.get_delivery_status(watcher.name, post.post_id)
+            if status.body_sent:
+                store.mark_seen(watcher.name, post.post_id, post.title, post.url)
+                LOGGER.info(
+                    "Completed previously sent body after audio delivery was disabled: %s",
+                    post.title,
+                )
+                continue
             body_text = client.fetch_post_body_text(post)
             if _send_body_messages(telegram, body_text, post.title):
                 store.mark_seen(watcher.name, post.post_id, post.title, post.url)
@@ -287,6 +297,66 @@ def _process_watcher(
                 )
             continue
 
+        _process_audio_post(client, store, telegram, config, watcher, post)
+
+
+def _process_audio_post(
+    client: UsInsightClient,
+    store: SeenStore,
+    telegram: TelegramClient,
+    config: AppConfig,
+    watcher: WatcherConfig,
+    post: PostRef,
+) -> None:
+    status = store.get_delivery_status(watcher.name, post.post_id)
+    body_sent, audio_sent, failures = _deliver_audio_post(
+        client,
+        telegram,
+        config,
+        watcher,
+        post,
+        body_sent=status.body_sent,
+        audio_sent=status.audio_sent,
+        on_body_sent=lambda: store.mark_body_sent(
+            watcher.name, post.post_id, post.title, post.url
+        ),
+        on_audio_sent=lambda: store.mark_audio_sent(
+            watcher.name, post.post_id, post.title, post.url
+        ),
+    )
+
+    if body_sent and audio_sent:
+        store.mark_seen(watcher.name, post.post_id, post.title, post.url)
+        LOGGER.info("Completed body and audio delivery: %s", post.title)
+
+    for summary, exc in failures:
+        _notify_poll_failure_with_cooldown(
+            telegram,
+            store,
+            watcher.name,
+            summary,
+            exc,
+            post,
+        )
+
+
+def _deliver_audio_post(
+    client: UsInsightClient,
+    telegram: TelegramClient,
+    config: AppConfig,
+    watcher: WatcherConfig,
+    post: PostRef,
+    *,
+    body_sent: bool = False,
+    audio_sent: bool = False,
+    admin_only: bool = False,
+    on_body_sent: Callable[[], None] | None = None,
+    on_audio_sent: Callable[[], None] | None = None,
+) -> tuple[bool, bool, list[tuple[str, Exception | None]]]:
+    audio = None
+    failures: list[tuple[str, Exception | None]] = []
+
+    if not audio_sent:
         try:
             audio = client.download_audio_from_post(
                 post,
@@ -294,19 +364,51 @@ def _process_watcher(
                 watcher.audio_filename_template,
             )
         except AudioNotAvailableYet:
-            LOGGER.info("Audio is not available yet; will retry on next poll: %s", post.title)
-            continue
-        audio_caption = audio.path.stem
-        telegram.send_audio(audio.path, audio_caption)
-        store.mark_seen(watcher.name, post.post_id, post.title, post.url)
-        if not _send_body_messages(telegram, audio.body_text, post.title):
-            _notify_poll_failure(
-                telegram,
-                watcher.name,
-                "failed to send audio body message",
-                post=post,
-            )
-        LOGGER.info("Sent to Telegram: %s", post.title)
+            LOGGER.info("Audio is not available yet; checking body independently: %s", post.title)
+        except Exception as exc:
+            LOGGER.exception("Failed to fetch audio for post: %s", post.title)
+            failures.append(("failed to fetch audio", exc))
+
+    if not body_sent:
+        body_text: str | None = None
+        body_ready = False
+        if audio is not None:
+            body_text = audio.body_text
+            body_ready = audio.body_ready
+        else:
+            try:
+                body = client.fetch_post_body(post)
+            except Exception as exc:
+                LOGGER.exception("Failed to fetch body for post: %s", post.title)
+                failures.append(("failed to fetch audio watcher body", exc))
+            else:
+                body_text = body.text
+                body_ready = body.is_ready
+
+        if body_text is not None:
+            if not body_ready:
+                LOGGER.info("Body is not ready yet; will retry without marking sent: %s", post.title)
+            elif _send_body_messages(telegram, body_text, post.title, admin_only=admin_only):
+                if on_body_sent:
+                    on_body_sent()
+                body_sent = True
+                LOGGER.info("Sent body to Telegram: %s", post.title)
+            else:
+                failures.append(("failed to send audio watcher body message", None))
+
+    if not audio_sent and audio is not None:
+        try:
+            telegram.send_audio(audio.path, audio.path.stem, admin_only=admin_only)
+        except Exception as exc:
+            LOGGER.exception("Failed to send audio for post: %s", post.title)
+            failures.append(("failed to send audio", exc))
+        else:
+            if on_audio_sent:
+                on_audio_sent()
+            audio_sent = True
+            LOGGER.info("Sent audio to Telegram: %s", post.title)
+
+    return body_sent, audio_sent, failures
 
 
 def _notify_login_required(
@@ -333,6 +435,29 @@ def _notify_login_required(
         f"오류: {exc}"
     )
     _send_admin_alert_with_retry(telegram, message, "login-required")
+
+
+def _notify_poll_failure_with_cooldown(
+    telegram: TelegramClient,
+    store: SeenStore,
+    watcher_name: str,
+    summary: str,
+    exc: Exception | None = None,
+    post: PostRef | None = None,
+) -> None:
+    post_key = post.post_id if post else "no-post"
+    notification_key = f"poll_failure:{watcher_name}:{post_key}:{summary}"
+    if not store.should_send_notification(
+        notification_key,
+        POLL_FAILURE_ALERT_COOLDOWN_MINUTES,
+    ):
+        LOGGER.info(
+            "Poll-failure admin alert suppressed by %s minute cooldown: %s",
+            POLL_FAILURE_ALERT_COOLDOWN_MINUTES,
+            notification_key,
+        )
+        return
+    _notify_poll_failure(telegram, watcher_name, summary, exc, post)
 
 
 def _notify_poll_failure(
@@ -465,24 +590,27 @@ def _process_latest_for_test(
                 )
             continue
 
-        try:
-            audio = client.download_audio_from_post(
-                post,
-                config.storage.download_dir,
-                watcher.audio_filename_template,
-            )
-        except AudioNotAvailableYet:
-            LOGGER.info("Audio is not available yet for latest test post: %s", post.title)
-            continue
-        audio_caption = audio.path.stem
-        telegram.send_audio(audio.path, audio_caption, admin_only=admin_only)
-        _send_body_messages(telegram, audio.body_text, post.title, admin_only=admin_only)
-        LOGGER.info(
-            "Sent latest test post %s/%s to Telegram without marking seen: %s",
-            index,
-            len(posts),
-            post.title,
+        body_sent, audio_sent, _failures = _deliver_audio_post(
+            client,
+            telegram,
+            config,
+            watcher,
+            post,
+            admin_only=admin_only,
         )
+        sent_parts = [
+            part for part, sent in (("body", body_sent), ("audio", audio_sent)) if sent
+        ]
+        if sent_parts:
+            LOGGER.info(
+                "Sent latest test post %s/%s parts=%s without marking seen: %s",
+                index,
+                len(posts),
+                ",".join(sent_parts),
+                post.title,
+            )
+        else:
+            LOGGER.info("No ready content for latest test post: %s", post.title)
 
 
 def _process_latest_body_for_test(
@@ -600,7 +728,7 @@ def _filter_posts_for_seed(watcher: WatcherConfig, posts: list[PostRef]) -> list
     return filtered_posts
 
 
-def _mark_prior_posts_seen_if_today_exists(
+def _mark_prior_posts_seen(
     store: SeenStore,
     watcher: WatcherConfig,
     posts: list[PostRef],
@@ -609,14 +737,11 @@ def _mark_prior_posts_seen_if_today_exists(
         return
 
     today = datetime.now()
-    if not any(_title_matches_today(post.title, today) for post in posts):
-        return
-
     for post in posts:
         if _title_is_before_today(post.title, today) and not store.has_seen(watcher.name, post.post_id):
             store.mark_seen(watcher.name, post.post_id, post.title, post.url)
             LOGGER.info(
-                "Marked prior-date post complete because today's post exists: %s",
+                "Marked prior-date post complete regardless of partial delivery: %s",
                 post.title,
             )
 
@@ -642,11 +767,17 @@ def _date_from_title(title: str, today: datetime) -> datetime | None:
 
     month = int(match.group(1))
     day = int(match.group(2))
-    try:
-        return datetime(year=today.year, month=month, day=day)
-    except ValueError:
+    candidates = []
+    for year in (today.year - 1, today.year, today.year + 1):
+        try:
+            candidates.append(datetime(year=year, month=month, day=day))
+        except ValueError:
+            continue
+
+    if not candidates:
         LOGGER.info("Post title has invalid Korean date; skipping date comparison: %s", title)
         return None
+    return min(candidates, key=lambda candidate: abs(candidate - today))
 
 
 def _telegram_body_messages(body_text: str) -> list[str]:
