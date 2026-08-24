@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -14,6 +15,7 @@ from daily_us.config import TelegramConfig
 
 LOGGER = logging.getLogger(__name__)
 MAX_RECIPIENT_RETRIES = 2
+MAX_ALBUM_ITEMS = 10
 DEFAULT_RETRY_DELAYS_SECONDS = (10, 30)
 
 
@@ -105,15 +107,100 @@ class TelegramClient:
 
         return self._send_to_recipients("sendDocument", send_one, admin_only=admin_only)
 
+    def send_photo(
+        self,
+        photo_path: Path,
+        caption: str | None = None,
+        admin_only: bool = False,
+        silent: bool = False,
+    ) -> list[str]:
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendPhoto"
+
+        def send_one(chat_id: str) -> None:
+            data = {"chat_id": chat_id}
+            if caption:
+                data["caption"] = caption
+            if silent:
+                data["disable_notification"] = "true"
+
+            with photo_path.open("rb") as photo:
+                response = requests.post(
+                    url,
+                    data=data,
+                    files={"photo": (photo_path.name, photo, "image/png")},
+                    timeout=120,
+                )
+            _raise_for_telegram_error(response, "sendPhoto")
+
+        return self._send_to_recipients("sendPhoto", send_one, admin_only=admin_only)
+
+    def send_photo_album(
+        self,
+        photo_paths: list[Path],
+        caption: str | None = None,
+        admin_only: bool = False,
+        silent: bool = False,
+    ) -> list[str]:
+        """Send up to MAX_ALBUM_ITEMS photos as a single album message.
+
+        Callers must batch longer sequences themselves so that a retry only
+        repeats the album that actually failed.
+        """
+        if not photo_paths:
+            raise ValueError("send_photo_album needs at least one photo.")
+        if len(photo_paths) > MAX_ALBUM_ITEMS:
+            raise ValueError(
+                f"Telegram albums hold at most {MAX_ALBUM_ITEMS} photos, "
+                f"got {len(photo_paths)}. Batch the photos before calling."
+            )
+        if len(photo_paths) == 1:
+            return self.send_photo(
+                photo_paths[0],
+                caption=caption,
+                admin_only=admin_only,
+                silent=silent,
+            )
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMediaGroup"
+
+        def send_one(chat_id: str) -> None:
+            media: list[dict[str, str]] = []
+            files: dict[str, tuple[str, Any, str]] = {}
+            handles = []
+            try:
+                for index, path in enumerate(photo_paths):
+                    key = f"photo{index}"
+                    item = {"type": "photo", "media": f"attach://{key}"}
+                    if index == 0 and caption:
+                        item["caption"] = caption
+                    media.append(item)
+                    handle = path.open("rb")
+                    handles.append(handle)
+                    files[key] = (path.name, handle, "image/png")
+
+                data = {"chat_id": chat_id, "media": json.dumps(media)}
+                if silent:
+                    data["disable_notification"] = "true"
+                response = requests.post(url, data=data, files=files, timeout=300)
+            finally:
+                for handle in handles:
+                    handle.close()
+            _raise_for_telegram_error(response, "sendMediaGroup")
+
+        return self._send_to_recipients("sendMediaGroup", send_one, admin_only=admin_only)
+
     def send_message(
         self,
         text: str,
         parse_mode: str | None = None,
         admin_only: bool = False,
+        silent: bool = False,
     ) -> list[str]:
         return self._send_to_recipients(
             "sendMessage",
-            lambda chat_id: self._send_message_to(chat_id, text, parse_mode=parse_mode),
+            lambda chat_id: self._send_message_to(
+                chat_id, text, parse_mode=parse_mode, silent=silent
+            ),
             admin_only=admin_only,
         )
 
@@ -127,10 +214,13 @@ class TelegramClient:
         chat_id: str,
         text: str,
         parse_mode: str | None = None,
+        silent: bool = False,
     ) -> None:
         data = {"chat_id": chat_id, "text": text}
         if parse_mode:
             data["parse_mode"] = parse_mode
+        if silent:
+            data["disable_notification"] = "true"
 
         response = requests.post(
             f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
