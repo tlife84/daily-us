@@ -32,6 +32,17 @@ LOGGER = logging.getLogger(__name__)
 REFRESH_TOKEN_COOKIE = "us_refreshToken"
 TOKEN_EXPIRY_WARNING_DAYS = 3
 
+# 본문 캡처는 사이트의 모바일 레이아웃으로 찍는다. 데스크톱 레이아웃은 본문 컬럼이
+# 660px라, 폰에서 보면 같은 글이 그만큼 작게 보인다. 모바일은 430px로 좁아진다.
+BODY_CAPTURE_VIEWPORT = {"width": 430, "height": 932}
+BODY_CAPTURE_SCALE_FACTOR = 2
+# 텔레그램은 사진의 긴 변을 2560px로 줄인다. 그 아래로 잘라야 축소 없이 도착한다.
+BODY_CAPTURE_MAX_PIXEL_HEIGHT = 2560
+BODY_CAPTURE_MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+)
+
 
 @dataclass(frozen=True)
 class PostRef:
@@ -50,6 +61,12 @@ class DownloadedAudio:
 @dataclass(frozen=True)
 class PostBody:
     text: str
+    is_ready: bool
+
+
+@dataclass(frozen=True)
+class CapturedPostBody:
+    image_paths: list[Path]
     is_ready: bool
 
 
@@ -73,6 +90,7 @@ class UsInsightClient:
         self._playwright = None
         self.browser: Browser | None = None
         self.context: BrowserContext | None = None
+        self.body_capture_context: BrowserContext | None = None
 
     def __enter__(self) -> "UsInsightClient":
         self._playwright = sync_playwright().start()
@@ -89,11 +107,17 @@ class UsInsightClient:
             context_options["storage_state"] = auth_state
 
         self.context = self.browser.new_context(**context_options)
-        self._restore_session_storage()
+        self._restore_session_storage(self.context)
         self.context.set_default_timeout(self.config.navigation_timeout_ms)
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        try:
+            if self.body_capture_context:
+                self.body_capture_context.close()
+        except Exception:
+            LOGGER.exception("Failed to close body capture context.")
+
         try:
             if self.context:
                 self.context.close()
@@ -210,6 +234,109 @@ class UsInsightClient:
             return _post_body_from_page(page, post)
         finally:
             page.close()
+
+    def capture_post_body_images(self, post: PostRef, output_dir: Path) -> CapturedPostBody:
+        """Screenshot a post body as a sequence of Telegram-ready photos.
+
+        Tables and charts on this site are posted as images, so the Markdown
+        extraction drops them and the reader is left with headings and no
+        numbers. Shooting the rendered body keeps everything.
+        """
+        page = self._body_capture_context().new_page()
+        try:
+            LOGGER.info("Opening post for body capture: %s", post.url)
+            self._goto(page, post.url)
+            self._wait_for_network_idle(page)
+            self._wait_for_page_settle(page)
+            _scroll_to_load_lazy_images(page)
+
+            if not _is_post_body_ready(_extract_post_body_text(page)):
+                LOGGER.info("Body is not ready for capture yet: %s", post.title)
+                return CapturedPostBody(image_paths=[], is_ready=False)
+
+            prepared = _prepare_page_for_body_capture(page)
+            if not prepared.get("editorFound"):
+                LOGGER.warning("Post body element was not found for capture: %s", post.url)
+                return CapturedPostBody(image_paths=[], is_ready=False)
+
+            LOGGER.info(
+                "Prepared body capture for %s: repaired %s data URI(s), hid %s overlay(s), "
+                "cover removed=%s, notices removed=%s, unloaded images=%s",
+                post.title,
+                prepared.get("repairedDataUris"),
+                prepared.get("hiddenOverlays"),
+                prepared.get("coverRemoved"),
+                prepared.get("noticesRemoved"),
+                prepared.get("brokenImages"),
+            )
+            if prepared.get("brokenImages"):
+                LOGGER.warning(
+                    "%s image(s) never finished loading and will appear blank: %s",
+                    prepared.get("brokenImages"),
+                    post.url,
+                )
+
+            max_css_height = BODY_CAPTURE_MAX_PIXEL_HEIGHT // BODY_CAPTURE_SCALE_FACTOR
+            layout = _body_capture_layout(page, max_css_height)
+            if not layout or not layout["chunks"]:
+                LOGGER.warning("Post body has no visible blocks to capture: %s", post.url)
+                return CapturedPostBody(image_paths=[], is_ready=False)
+
+            output_dir.mkdir(parents=True, exist_ok=True)
+            stem = _safe_filename(post.post_id) or "body"
+            image_paths = []
+            for index, chunk in enumerate(layout["chunks"], start=1):
+                target = output_dir / f"{stem}-{index:02d}.png"
+                page.screenshot(
+                    path=str(target),
+                    full_page=True,
+                    clip={
+                        "x": layout["left"],
+                        "y": chunk["y"],
+                        "width": layout["width"],
+                        "height": chunk["height"],
+                    },
+                )
+                image_paths.append(target)
+
+            LOGGER.info(
+                "Captured %s body image(s) at %spx wide: %s",
+                len(image_paths),
+                int(layout["width"] * BODY_CAPTURE_SCALE_FACTOR),
+                post.title,
+            )
+            return CapturedPostBody(image_paths=image_paths, is_ready=True)
+        finally:
+            page.close()
+
+    def _body_capture_context(self) -> BrowserContext:
+        """Open a phone-sized context, separate from the desktop one.
+
+        The desktop context drives feed parsing and the audio player, so it
+        stays as it is; capture gets its own context instead.
+        """
+        if self.body_capture_context is not None:
+            return self.body_capture_context
+        if not self.browser:
+            raise RuntimeError("Browser is not open.")
+
+        context_options: dict[str, object] = {
+            "viewport": dict(BODY_CAPTURE_VIEWPORT),
+            "device_scale_factor": BODY_CAPTURE_SCALE_FACTOR,
+            "is_mobile": True,
+            "has_touch": True,
+            "user_agent": BODY_CAPTURE_MOBILE_USER_AGENT,
+            "locale": "ko-KR",
+        }
+        auth_state = self._load_saved_auth_state()
+        if auth_state is not None:
+            context_options["storage_state"] = auth_state
+
+        context = self.browser.new_context(**context_options)
+        self._restore_session_storage(context)
+        context.set_default_timeout(self.config.navigation_timeout_ms)
+        self.body_capture_context = context
+        return context
 
     def fetch_post_content(
         self,
@@ -621,8 +748,8 @@ class UsInsightClient:
         )
         _write_json_atomically(self.config.session_storage_path, {origin: session_storage})
 
-    def _restore_session_storage(self) -> None:
-        if not self.context or not self.config.session_storage_path.exists():
+    def _restore_session_storage(self, context: BrowserContext) -> None:
+        if not self.config.session_storage_path.exists():
             return
 
         try:
@@ -644,7 +771,7 @@ class UsInsightClient:
           }}
         }})();
         """
-        self.context.add_init_script(script=script)
+        context.add_init_script(script=script)
 
 
 def _write_json_atomically(path: Path, payload: object) -> None:
@@ -747,6 +874,145 @@ def _is_post_body_ready(body_text: str) -> bool:
 
 def _is_script_preparing_marker(value: str) -> bool:
     return re.fullmatch(r"스크립트\s*준비\s*중", _normalize_text(value)) is not None
+
+
+def _scroll_to_load_lazy_images(page: Page) -> None:
+    page.evaluate(
+        """
+        async () => {
+          const step = window.innerHeight || 900;
+          for (let y = 0; y < document.body.scrollHeight; y += step) {
+            window.scrollTo(0, y);
+            await new Promise((resolve) => setTimeout(resolve, 120));
+          }
+          window.scrollTo(0, 0);
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        """
+    )
+
+
+def _prepare_page_for_body_capture(page: Page) -> dict[str, object]:
+    return page.evaluate(
+        """
+        async () => {
+          const editor = document.querySelector('.tiptap.ProseMirror');
+          if (!editor) return { editorFound: false };
+
+          // us-insight appends ?w=1080 to every image src, data: URIs included.
+          // That suffix corrupts the base64 payload, so those images never
+          // decode - they are blank on the site too. Dropping the query fixes them.
+          let repairedDataUris = 0;
+          for (const image of editor.querySelectorAll('img')) {
+            const src = image.getAttribute('src') || '';
+            if (!src.startsWith('data:')) continue;
+            const query = src.indexOf('?');
+            if (query === -1) continue;
+            image.setAttribute('src', src.slice(0, query));
+            repairedDataUris += 1;
+          }
+
+          // Fixed and sticky chrome is painted into full-page screenshots and
+          // covers the body. Match on position rather than class names so the
+          // rule survives the site restyling its banners.
+          let hiddenOverlays = 0;
+          for (const element of document.querySelectorAll('body *')) {
+            const style = getComputedStyle(element);
+            if (style.position !== 'fixed' && style.position !== 'sticky') continue;
+            if (editor.contains(element) || element.contains(editor)) continue;
+            element.style.setProperty('display', 'none', 'important');
+            hiddenOverlays += 1;
+          }
+
+          let coverRemoved = false;
+          for (const child of editor.children) {
+            if (child.querySelector('img')) {
+              child.style.display = 'none';
+              coverRemoved = true;
+              break;
+            }
+            if ((child.innerText || '').trim()) break;
+          }
+
+          let noticesRemoved = 0;
+          for (const child of editor.children) {
+            const text = child.innerText || '';
+            if (text.includes('투자 유의사항') || text.includes('유사투자자문')) {
+              child.style.display = 'none';
+              noticesRemoved += 1;
+            }
+          }
+
+          const pending = [...editor.querySelectorAll('img')]
+            .filter((image) => !image.complete)
+            .map((image) => new Promise((resolve) => {
+              image.addEventListener('load', resolve, { once: true });
+              image.addEventListener('error', resolve, { once: true });
+            }));
+          await Promise.race([
+            Promise.all(pending),
+            new Promise((resolve) => setTimeout(resolve, 15000)),
+          ]);
+
+          const brokenImages = [...editor.querySelectorAll('img')]
+            .filter((image) => !image.complete || image.naturalWidth === 0).length;
+
+          return {
+            editorFound: true,
+            repairedDataUris,
+            hiddenOverlays,
+            coverRemoved,
+            noticesRemoved,
+            brokenImages,
+          };
+        }
+        """
+    )
+
+
+def _body_capture_layout(page: Page, max_css_height: int) -> dict[str, object] | None:
+    """Group top-level body blocks into slices no taller than max_css_height."""
+    return page.evaluate(
+        """
+        (maxCssHeight) => {
+          const editor = document.querySelector('.tiptap.ProseMirror');
+          if (!editor) return null;
+
+          const rect = editor.getBoundingClientRect();
+          const rows = [...editor.children]
+            .filter((child) => child.getBoundingClientRect().height > 0)
+            .map((child) => {
+              const box = child.getBoundingClientRect();
+              return { top: box.top + window.scrollY, bottom: box.bottom + window.scrollY };
+            });
+          if (!rows.length) return null;
+
+          const chunks = [];
+          // A single block can be taller than the limit on its own, so cut it
+          // rather than emitting a slice Telegram would refuse.
+          const pushRange = (from, to) => {
+            let cursor = from;
+            while (to - cursor > maxCssHeight) {
+              chunks.push({ y: cursor, height: maxCssHeight });
+              cursor += maxCssHeight;
+            }
+            if (to - cursor > 4) chunks.push({ y: cursor, height: to - cursor });
+          };
+
+          let start = rows[0].top;
+          for (const row of rows) {
+            if (row.bottom - start > maxCssHeight && row.top > start) {
+              pushRange(start, row.top);
+              start = row.top;
+            }
+          }
+          pushRange(start, rows[rows.length - 1].bottom);
+
+          return { left: rect.left + window.scrollX, width: rect.width, chunks };
+        }
+        """,
+        max_css_height,
+    )
 
 
 def _extract_post_body_text(page: Page) -> str:
