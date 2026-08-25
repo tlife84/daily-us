@@ -17,6 +17,7 @@ from daily_us.poller import (
 )
 from daily_us.site import (
     AudioNotAvailableYet,
+    CapturedPostBody,
     DownloadedAudio,
     PostBody,
     PostRef,
@@ -26,14 +27,14 @@ from daily_us.site import (
 from daily_us.storage import SeenStore
 
 
-def _audio_watcher() -> WatcherConfig:
+def _audio_watcher(send_body_as_image: bool = False) -> WatcherConfig:
     return WatcherConfig(
         name="good_morning_damsaem",
         title_contains="굿모닝 담쌤",
         title_exclude_contains=(),
         send_audio=True,
         send_pdf=False,
-        send_body_as_image=False,
+        send_body_as_image=send_body_as_image,
         audio_filename_template="굿모닝 담쌤 {mm-dd}",
         only_today=True,
         active_days=None,
@@ -279,3 +280,107 @@ class AudioDeliveryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AudioWatcherBodyImageTest(unittest.TestCase):
+    """굿모닝 담쌤처럼 오디오와 본문 사진을 함께 보내는 워처의 동작."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.store = SeenStore(self.root / "seen.sqlite3")
+        self.config = SimpleNamespace(
+            storage=SimpleNamespace(download_dir=self.root / "downloads")
+        )
+        self.watcher = _audio_watcher(send_body_as_image=True)
+        self.telegram = Mock()
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _capture(self, count: int = 2):
+        def capture(_post: PostRef, output_dir: Path) -> CapturedPostBody:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            paths = []
+            for index in range(count):
+                path = output_dir / f"body-{index:02d}.png"
+                path.write_bytes(b"png")
+                paths.append(path)
+            return CapturedPostBody(image_paths=paths, is_ready=True)
+
+        return capture
+
+    def test_sends_body_photos_before_audio(self) -> None:
+        post = _dated_post(datetime.now())
+        audio_path = self.root / "굿모닝 담쌤.mp3"
+        client = Mock()
+        client.find_posts.return_value = [post]
+        client.capture_post_body_images.side_effect = self._capture()
+        client.download_audio_from_post.return_value = DownloadedAudio(audio_path, "본문")
+
+        _process_watcher(client, self.store, self.telegram, self.config, self.watcher)
+
+        self.telegram.send_photo_album.assert_called_once()
+        self.telegram.send_message.assert_not_called()
+        self.telegram.send_audio.assert_called_once()
+        self.assertTrue(self.store.has_seen(self.watcher.name, post.post_id))
+
+    def test_sends_body_photos_first_then_retries_only_audio(self) -> None:
+        post = _dated_post(datetime.now())
+        client = Mock()
+        client.find_posts.return_value = [post]
+        client.capture_post_body_images.side_effect = self._capture()
+        client.download_audio_from_post.side_effect = AudioNotAvailableYet("not yet")
+
+        _process_watcher(client, self.store, self.telegram, self.config, self.watcher)
+
+        self.telegram.send_photo_album.assert_called_once()
+        self.telegram.send_audio.assert_not_called()
+        self.assertFalse(self.store.has_seen(self.watcher.name, post.post_id))
+        status = self.store.get_delivery_status(self.watcher.name, post.post_id)
+        self.assertTrue(status.body_sent)
+        self.assertFalse(status.audio_sent)
+
+        client.capture_post_body_images.reset_mock()
+        audio_path = self.root / "굿모닝 담쌤.mp3"
+        client.download_audio_from_post.side_effect = None
+        client.download_audio_from_post.return_value = DownloadedAudio(audio_path, "본문")
+
+        _process_watcher(client, self.store, self.telegram, self.config, self.watcher)
+
+        client.capture_post_body_images.assert_not_called()
+        self.telegram.send_photo_album.assert_called_once()
+        self.telegram.send_audio.assert_called_once()
+        self.assertTrue(self.store.has_seen(self.watcher.name, post.post_id))
+
+    def test_does_not_use_the_audio_page_body(self) -> None:
+        post = _dated_post(datetime.now())
+        audio_path = self.root / "굿모닝 담쌤.mp3"
+        client = Mock()
+        client.find_posts.return_value = [post]
+        client.capture_post_body_images.side_effect = self._capture()
+        client.download_audio_from_post.return_value = DownloadedAudio(audio_path, "본문")
+
+        _process_watcher(client, self.store, self.telegram, self.config, self.watcher)
+
+        client.capture_post_body_images.assert_called_once()
+        client.fetch_post_body.assert_not_called()
+
+    def test_unready_body_does_not_block_audio(self) -> None:
+        post = _dated_post(datetime.now())
+        audio_path = self.root / "굿모닝 담쌤.mp3"
+        client = Mock()
+        client.find_posts.return_value = [post]
+        client.capture_post_body_images.return_value = CapturedPostBody(
+            image_paths=[], is_ready=False
+        )
+        client.download_audio_from_post.return_value = DownloadedAudio(audio_path, "본문")
+
+        _process_watcher(client, self.store, self.telegram, self.config, self.watcher)
+
+        self.telegram.send_photo_album.assert_not_called()
+        self.telegram.send_audio.assert_called_once()
+        status = self.store.get_delivery_status(self.watcher.name, post.post_id)
+        self.assertFalse(status.body_sent)
+        self.assertTrue(status.audio_sent)
+        self.assertFalse(self.store.has_seen(self.watcher.name, post.post_id))

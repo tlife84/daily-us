@@ -20,6 +20,7 @@ watchers:
   - name: "good_morning_damsaem"
     title_contains: "굿모닝 담쌤"
     send_audio: true
+    send_body_as_image: true
     audio_filename_template: "굿모닝 담쌤 {mm-dd}"
     only_today: true
     active_hours: ["07:00", "09:10"]

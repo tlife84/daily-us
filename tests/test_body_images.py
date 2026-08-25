@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 from daily_us.config import WatcherConfig
 from daily_us.poller import _deliver_body, _process_watcher
-from daily_us.site import CapturedPostBody, PostRef
+from daily_us.site import CapturedPostBody, PostBody, PostRef
 from daily_us.storage import SeenStore
 from daily_us.telegram import MAX_ALBUM_ITEMS
 
@@ -125,7 +125,7 @@ class BodyImageDeliveryTest(unittest.TestCase):
 
     def test_text_watcher_still_sends_messages(self) -> None:
         client = Mock()
-        client.fetch_post_body_text.return_value = "본문"
+        client.fetch_post_body.return_value = PostBody("본문", is_ready=True)
 
         result = _deliver_body(
             client, self.telegram, _image_watcher(send_body_as_image=False), _post()
@@ -135,6 +135,18 @@ class BodyImageDeliveryTest(unittest.TestCase):
         self.telegram.send_message.assert_called_once()
         self.telegram.send_photo_album.assert_not_called()
         client.capture_post_body_images.assert_not_called()
+
+    def test_text_watcher_waits_for_an_unready_body(self) -> None:
+        client = Mock()
+        client.fetch_post_body.return_value = PostBody("스크립트 준비 중", is_ready=False)
+
+        result = _deliver_body(
+            client, self.telegram, _image_watcher(send_body_as_image=False), _post()
+        )
+
+        self.assertFalse(result.sent)
+        self.assertFalse(result.ready)
+        self.telegram.send_message.assert_not_called()
 
     def test_unready_post_is_retried_without_alerting_admin(self) -> None:
         post = _post()

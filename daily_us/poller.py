@@ -10,7 +10,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from daily_us.config import AppConfig, WatcherConfig
-from daily_us.site import AudioNotAvailableYet, LoginRequired, PostRef, UsInsightClient
+from daily_us.site import (
+    AudioNotAvailableYet,
+    LoginRequired,
+    PostBody,
+    PostRef,
+    UsInsightClient,
+)
 from daily_us.storage import SeenStore
 from daily_us.telegram import MAX_ALBUM_ITEMS, TelegramClient
 
@@ -275,7 +281,11 @@ def _process_watcher(
                 )
 
             body = _deliver_body(
-                client, telegram, watcher, post, body_text=content.body_text
+                client,
+                telegram,
+                watcher,
+                post,
+                body=PostBody(text=content.body_text, is_ready=True),
             )
             if body.sent:
                 store.mark_seen(watcher.name, post.post_id, post.title, post.url)
@@ -387,29 +397,29 @@ def _deliver_audio_post(
             failures.append(("failed to fetch audio", exc))
 
     if not body_sent:
-        body_text: str | None = None
-        body_ready = False
-        if audio is not None:
-            body_text = audio.body_text
-            body_ready = audio.body_ready
-        else:
-            try:
-                body = client.fetch_post_body(post)
-            except Exception as exc:
-                LOGGER.exception("Failed to fetch body for post: %s", post.title)
-                failures.append(("failed to fetch audio watcher body", exc))
-            else:
-                body_text = body.text
-                body_ready = body.is_ready
+        # 오디오를 받으면서 같은 페이지에서 본문도 함께 읽어온다. 사진으로 보내는 워처는 캡처가
+        # 별도 페이지를 열어야 하므로 이 본문을 쓰지 않는다.
+        prepared = (
+            PostBody(text=audio.body_text, is_ready=audio.body_ready)
+            if audio is not None
+            else None
+        )
 
-        if body_text is not None:
-            if not body_ready:
-                LOGGER.info("Body is not ready yet; will retry without marking sent: %s", post.title)
-            elif _send_body_messages(telegram, body_text, post.title, admin_only=admin_only):
+        try:
+            delivery = _deliver_body(
+                client, telegram, watcher, post, body=prepared, admin_only=admin_only
+            )
+        except Exception as exc:
+            LOGGER.exception("Failed to fetch body for post: %s", post.title)
+            failures.append(("failed to fetch audio watcher body", exc))
+        else:
+            if delivery.sent:
                 if on_body_sent:
                     on_body_sent()
                 body_sent = True
                 LOGGER.info("Sent body to Telegram: %s", post.title)
+            elif not delivery.ready:
+                LOGGER.info("Body is not ready yet; will retry without marking sent: %s", post.title)
             else:
                 failures.append(("failed to send audio watcher body message", None))
 
@@ -574,7 +584,7 @@ def _process_latest_for_test(
                     telegram,
                     watcher,
                     post,
-                    body_text=content.body_text,
+                    body=PostBody(text=content.body_text, is_ready=True),
                     admin_only=admin_only,
                 ).sent
 
@@ -670,7 +680,7 @@ def _deliver_body(
     telegram: TelegramClient,
     watcher: WatcherConfig,
     post: PostRef,
-    body_text: str | None = None,
+    body: PostBody | None = None,
     admin_only: bool = False,
 ) -> BodyDelivery:
     """Send a post body, as photos or as text depending on the watcher.
@@ -680,33 +690,38 @@ def _deliver_body(
         telegram: Telegram client the body is sent through.
         watcher: Watcher whose send_body_as_image decides the format.
         post: The post being delivered.
-        body_text: Body text already fetched by the caller, to avoid loading the post twice.
+        body: Body the caller already fetched, to avoid loading the post twice. Ignored when the
+            watcher sends photos, since a capture needs its own page.
         admin_only: Send to the admin chat instead of the normal recipients.
 
     Returns:
         Whether the body was sent, and whether the post was ready to send at all.
     """
-    if not watcher.send_body_as_image:
-        text = body_text if body_text is not None else client.fetch_post_body_text(post)
-        return BodyDelivery(
-            sent=_send_body_messages(telegram, text, post.title, admin_only=admin_only)
-        )
+    if watcher.send_body_as_image:
+        with tempfile.TemporaryDirectory(prefix="daily-us-body-") as temp_dir:
+            try:
+                captured = client.capture_post_body_images(post, Path(temp_dir))
+            except Exception:
+                LOGGER.exception("Failed to capture body images for post: %s", post.title)
+                return BodyDelivery(sent=False)
 
-    with tempfile.TemporaryDirectory(prefix="daily-us-body-") as temp_dir:
-        try:
-            captured = client.capture_post_body_images(post, Path(temp_dir))
-        except Exception:
-            LOGGER.exception("Failed to capture body images for post: %s", post.title)
-            return BodyDelivery(sent=False)
+            if not captured.is_ready:
+                LOGGER.info("Body is not ready to capture yet; will retry: %s", post.title)
+                return BodyDelivery(sent=False, ready=False)
 
-        if not captured.is_ready:
-            LOGGER.info("Body is not ready to capture yet; will retry: %s", post.title)
-            return BodyDelivery(sent=False, ready=False)
+            sent = _send_body_images(
+                telegram, captured.image_paths, post.title, admin_only=admin_only
+            )
+        return BodyDelivery(sent=sent)
 
-        sent = _send_body_images(
-            telegram, captured.image_paths, post.title, admin_only=admin_only
-        )
-    return BodyDelivery(sent=sent)
+    prepared = body if body is not None else client.fetch_post_body(post)
+    if not prepared.is_ready:
+        LOGGER.info("Body is not ready to send yet; will retry: %s", post.title)
+        return BodyDelivery(sent=False, ready=False)
+
+    return BodyDelivery(
+        sent=_send_body_messages(telegram, prepared.text, post.title, admin_only=admin_only)
+    )
 
 
 def _send_body_images(

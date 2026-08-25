@@ -42,6 +42,9 @@ BODY_CAPTURE_MOBILE_USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 )
+# 굿모닝 담쌤의 "뉴스 브리핑" 섹션은 보내지 않는다. 이 섹션은 제목 띠 이미지로 시작하는데
+# 띠 이미지에 alt 나 data 속성이 없어서, 매일 같은 파일을 쓰는 이미지 주소로 찾는다.
+BODY_CAPTURE_SKIPPED_SECTION_MARKER = "1753653851925_daccba1e"
 
 
 @dataclass(frozen=True)
@@ -267,11 +270,12 @@ class UsInsightClient:
 
             LOGGER.info(
                 "Prepared body capture for %s: repaired %s data URI(s), hid %s overlay(s), "
-                "cover removed=%s, unloaded images=%s",
+                "cover removed=%s, skipped section blocks=%s, unloaded images=%s",
                 post.title,
                 prepared.get("repairedDataUris"),
                 prepared.get("hiddenOverlays"),
                 prepared.get("coverRemoved"),
+                prepared.get("skippedSectionBlocks"),
                 prepared.get("brokenImages"),
             )
             if prepared.get("brokenImages"):
@@ -908,6 +912,8 @@ def _scroll_to_load_lazy_images(page: Page) -> None:
 def _prepare_page_for_body_capture(page: Page) -> dict[str, object]:
     """Repair broken images and strip everything that does not belong in the capture.
 
+    Removes the page chrome, the cover image and the trailing news briefing section.
+
     Args:
         page: The post page to prepare.
 
@@ -916,7 +922,7 @@ def _prepare_page_for_body_capture(page: Page) -> dict[str, object]:
     """
     return page.evaluate(
         """
-        async () => {
+        async (skippedSectionMarker) => {
           const editor = document.querySelector('.tiptap.ProseMirror');
           if (!editor) return { editorFound: false };
 
@@ -934,26 +940,78 @@ def _prepare_page_for_body_capture(page: Page) -> dict[str, object]:
 
           // Fixed and sticky chrome is painted into full-page screenshots and covers the body.
           // Matching on position rather than class names survives the site restyling its banners.
+          // The scroll-to-top button and the toast only exist while the page is scrolled down, and
+          // the site rebuilds them as the screenshot moves through the page, so an observer keeps
+          // sweeping until the capture is done rather than hiding what happens to be there now.
           let hiddenOverlays = 0;
-          for (const element of document.querySelectorAll('body *')) {
-            const style = getComputedStyle(element);
-            if (style.position !== 'fixed' && style.position !== 'sticky') continue;
-            if (editor.contains(element) || element.contains(editor)) continue;
-            element.style.setProperty('display', 'none', 'important');
-            hiddenOverlays += 1;
+          const sweepOverlays = () => {
+            for (const element of document.querySelectorAll('body *')) {
+              const style = getComputedStyle(element);
+              if (style.position !== 'fixed' && style.position !== 'sticky') continue;
+              if (style.display === 'none') continue;
+              if (editor.contains(element) || element.contains(editor)) continue;
+              element.style.setProperty('display', 'none', 'important');
+              hiddenOverlays += 1;
+            }
+          };
+
+          let sweepQueued = false;
+          const observer = new MutationObserver(() => {
+            if (sweepQueued) return;
+            sweepQueued = true;
+            requestAnimationFrame(() => {
+              sweepQueued = false;
+              sweepOverlays();
+            });
+          });
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['class', 'style'],
+          });
+
+          const scrollHeight = document.body.scrollHeight;
+          for (const offset of [scrollHeight / 2, scrollHeight, 0]) {
+            window.scrollTo(0, offset);
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            sweepOverlays();
           }
 
           let coverRemoved = false;
           for (const child of editor.children) {
             if (child.querySelector('img')) {
-              child.style.display = 'none';
+              child.style.setProperty('display', 'none', 'important');
               coverRemoved = true;
               break;
             }
             if ((child.innerText || '').trim()) break;
           }
 
-          const pending = [...editor.querySelectorAll('img')]
+          // The skipped section is its title banner followed by a run of news items and blank
+          // lines. It ends at the first block that carries text and is not a news item, which is
+          // where an attachment section or the closing line begins.
+          let skippedSectionBlocks = 0;
+          const blocks = [...editor.children];
+          const sectionStart = blocks.findIndex((child) => {
+            const banner = child.querySelector('img');
+            return !!banner && (banner.getAttribute('src') || '').includes(skippedSectionMarker);
+          });
+          if (sectionStart !== -1) {
+            for (const child of blocks.slice(sectionStart)) {
+              const isNewsItem = (child.className || '').toString().includes('node-callout');
+              const hasText = !!(child.innerText || '').trim();
+              if (skippedSectionBlocks > 0 && hasText && !isNewsItem) break;
+              child.style.setProperty('display', 'none', 'important');
+              skippedSectionBlocks += 1;
+            }
+          }
+
+          // Only images that survived the trimming are worth waiting for.
+          const visibleImages = () => [...editor.querySelectorAll('img')]
+            .filter((image) => image.getBoundingClientRect().width > 0);
+
+          const pending = visibleImages()
             .filter((image) => !image.complete)
             .map((image) => new Promise((resolve) => {
               image.addEventListener('load', resolve, { once: true });
@@ -964,7 +1022,7 @@ def _prepare_page_for_body_capture(page: Page) -> dict[str, object]:
             new Promise((resolve) => setTimeout(resolve, 15000)),
           ]);
 
-          const brokenImages = [...editor.querySelectorAll('img')]
+          const brokenImages = visibleImages()
             .filter((image) => !image.complete || image.naturalWidth === 0).length;
 
           return {
@@ -972,10 +1030,12 @@ def _prepare_page_for_body_capture(page: Page) -> dict[str, object]:
             repairedDataUris,
             hiddenOverlays,
             coverRemoved,
+            skippedSectionBlocks,
             brokenImages,
           };
         }
-        """
+        """,
+        BODY_CAPTURE_SKIPPED_SECTION_MARKER,
     )
 
 
