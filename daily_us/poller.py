@@ -26,9 +26,8 @@ ADMIN_ALERT_MAX_ATTEMPTS = 6
 class BodyDelivery:
     """Outcome of one body delivery attempt.
 
-    ``ready`` separates "the post is still rendering, try again later" from a
-    real failure, so a post that is not finished yet does not page the admin
-    once an hour.
+    ``ready`` separates "the post is still rendering, try again later" from a real failure, so an
+    unfinished post does not alert the admin once an hour.
     """
 
     sent: bool
@@ -674,6 +673,19 @@ def _deliver_body(
     body_text: str | None = None,
     admin_only: bool = False,
 ) -> BodyDelivery:
+    """Send a post body, as photos or as text depending on the watcher.
+
+    Args:
+        client: Site client used to capture or fetch the body.
+        telegram: Telegram client the body is sent through.
+        watcher: Watcher whose send_body_as_image decides the format.
+        post: The post being delivered.
+        body_text: Body text already fetched by the caller, to avoid loading the post twice.
+        admin_only: Send to the admin chat instead of the normal recipients.
+
+    Returns:
+        Whether the body was sent, and whether the post was ready to send at all.
+    """
     if not watcher.send_body_as_image:
         text = body_text if body_text is not None else client.fetch_post_body_text(post)
         return BodyDelivery(
@@ -703,6 +715,17 @@ def _send_body_images(
     post_title: str,
     admin_only: bool = False,
 ) -> bool:
+    """Send body slices as albums, ringing only once for the whole post.
+
+    Args:
+        telegram: Telegram client the photos are sent through.
+        image_paths: Body slices in reading order.
+        post_title: Post title, used for log messages only.
+        admin_only: Send to the admin chat instead of the normal recipients.
+
+    Returns:
+        True when every album was delivered.
+    """
     if not image_paths:
         LOGGER.warning("Body capture produced no images for post: %s", post_title)
         return False
@@ -710,8 +733,7 @@ def _send_body_images(
     try:
         for start in range(0, len(image_paths), MAX_ALBUM_ITEMS):
             batch = image_paths[start : start + MAX_ALBUM_ITEMS]
-            # Only the first album rings. A post that arrives as a dozen photos
-            # should notify once, not once per album.
+            # Only the first album rings, so a post that arrives as a dozen photos notifies once.
             telegram.send_photo_album(
                 batch,
                 admin_only=admin_only,

@@ -32,11 +32,11 @@ LOGGER = logging.getLogger(__name__)
 REFRESH_TOKEN_COOKIE = "us_refreshToken"
 TOKEN_EXPIRY_WARNING_DAYS = 3
 
-# 본문 캡처는 사이트의 모바일 레이아웃으로 찍는다. 데스크톱 레이아웃은 본문 컬럼이
-# 660px라, 폰에서 보면 같은 글이 그만큼 작게 보인다. 모바일은 430px로 좁아진다.
+# Capture uses the site's mobile layout, whose body column is 430px wide against the desktop 660px.
+# A desktop shot shows the same post that much smaller once it reaches a phone.
 BODY_CAPTURE_VIEWPORT = {"width": 430, "height": 932}
 BODY_CAPTURE_SCALE_FACTOR = 2
-# 텔레그램은 사진의 긴 변을 2560px로 줄인다. 그 아래로 잘라야 축소 없이 도착한다.
+# Telegram shrinks a photo's long side to 2560px, so slices stay under it to arrive untouched.
 BODY_CAPTURE_MAX_PIXEL_HEIGHT = 2560
 BODY_CAPTURE_MOBILE_USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
@@ -238,9 +238,15 @@ class UsInsightClient:
     def capture_post_body_images(self, post: PostRef, output_dir: Path) -> CapturedPostBody:
         """Screenshot a post body as a sequence of Telegram-ready photos.
 
-        Tables and charts on this site are posted as images, so the Markdown
-        extraction drops them and the reader is left with headings and no
-        numbers. Shooting the rendered body keeps everything.
+        Tables and charts on this site are posted as images, which the Markdown extraction drops,
+        leaving the reader with headings and no numbers. Shooting the rendered body keeps them.
+
+        Args:
+            post: The post to capture.
+            output_dir: Directory the PNG slices are written to.
+
+        Returns:
+            The slices in reading order. Empty when the post body is not ready yet.
         """
         page = self._body_capture_context().new_page()
         try:
@@ -261,12 +267,11 @@ class UsInsightClient:
 
             LOGGER.info(
                 "Prepared body capture for %s: repaired %s data URI(s), hid %s overlay(s), "
-                "cover removed=%s, notices removed=%s, unloaded images=%s",
+                "cover removed=%s, unloaded images=%s",
                 post.title,
                 prepared.get("repairedDataUris"),
                 prepared.get("hiddenOverlays"),
                 prepared.get("coverRemoved"),
-                prepared.get("noticesRemoved"),
                 prepared.get("brokenImages"),
             )
             if prepared.get("brokenImages"):
@@ -310,10 +315,13 @@ class UsInsightClient:
             page.close()
 
     def _body_capture_context(self) -> BrowserContext:
-        """Open a phone-sized context, separate from the desktop one.
+        """Open the phone-sized browser context used for capture, creating it on first use.
 
-        The desktop context drives feed parsing and the audio player, so it
-        stays as it is; capture gets its own context instead.
+        The desktop context drives feed parsing and the audio player, so capture takes its own
+        context instead of resizing that one.
+
+        Returns:
+            The mobile context, shared by every capture in this session.
         """
         if self.body_capture_context is not None:
             return self.body_capture_context
@@ -877,6 +885,11 @@ def _is_script_preparing_marker(value: str) -> bool:
 
 
 def _scroll_to_load_lazy_images(page: Page) -> None:
+    """Scroll the whole page once so lazily loaded images start fetching.
+
+    Args:
+        page: The post page to scroll.
+    """
     page.evaluate(
         """
         async () => {
@@ -893,15 +906,22 @@ def _scroll_to_load_lazy_images(page: Page) -> None:
 
 
 def _prepare_page_for_body_capture(page: Page) -> dict[str, object]:
+    """Repair broken images and strip everything that does not belong in the capture.
+
+    Args:
+        page: The post page to prepare.
+
+    Returns:
+        Counts of what was repaired, hidden and removed, for logging.
+    """
     return page.evaluate(
         """
         async () => {
           const editor = document.querySelector('.tiptap.ProseMirror');
           if (!editor) return { editorFound: false };
 
-          // us-insight appends ?w=1080 to every image src, data: URIs included.
-          // That suffix corrupts the base64 payload, so those images never
-          // decode - they are blank on the site too. Dropping the query fixes them.
+          // us-insight appends ?w=1080 to every image src, data: URIs included, and that suffix
+          // corrupts the base64 payload. Those images are blank on the site too.
           let repairedDataUris = 0;
           for (const image of editor.querySelectorAll('img')) {
             const src = image.getAttribute('src') || '';
@@ -912,9 +932,8 @@ def _prepare_page_for_body_capture(page: Page) -> dict[str, object]:
             repairedDataUris += 1;
           }
 
-          // Fixed and sticky chrome is painted into full-page screenshots and
-          // covers the body. Match on position rather than class names so the
-          // rule survives the site restyling its banners.
+          // Fixed and sticky chrome is painted into full-page screenshots and covers the body.
+          // Matching on position rather than class names survives the site restyling its banners.
           let hiddenOverlays = 0;
           for (const element of document.querySelectorAll('body *')) {
             const style = getComputedStyle(element);
@@ -932,15 +951,6 @@ def _prepare_page_for_body_capture(page: Page) -> dict[str, object]:
               break;
             }
             if ((child.innerText || '').trim()) break;
-          }
-
-          let noticesRemoved = 0;
-          for (const child of editor.children) {
-            const text = child.innerText || '';
-            if (text.includes('투자 유의사항') || text.includes('유사투자자문')) {
-              child.style.display = 'none';
-              noticesRemoved += 1;
-            }
           }
 
           const pending = [...editor.querySelectorAll('img')]
@@ -962,7 +972,6 @@ def _prepare_page_for_body_capture(page: Page) -> dict[str, object]:
             repairedDataUris,
             hiddenOverlays,
             coverRemoved,
-            noticesRemoved,
             brokenImages,
           };
         }
@@ -971,7 +980,15 @@ def _prepare_page_for_body_capture(page: Page) -> dict[str, object]:
 
 
 def _body_capture_layout(page: Page, max_css_height: int) -> dict[str, object] | None:
-    """Group top-level body blocks into slices no taller than max_css_height."""
+    """Group top-level body blocks into slices no taller than the given height.
+
+    Args:
+        page: The prepared post page.
+        max_css_height: Tallest slice allowed, in CSS pixels.
+
+    Returns:
+        The body's position and its slices, or None when the body has no visible block.
+    """
     return page.evaluate(
         """
         (maxCssHeight) => {
@@ -988,8 +1005,8 @@ def _body_capture_layout(page: Page, max_css_height: int) -> dict[str, object] |
           if (!rows.length) return null;
 
           const chunks = [];
-          // A single block can be taller than the limit on its own, so cut it
-          // rather than emitting a slice Telegram would refuse.
+          // A single block can exceed the limit on its own, so cut it rather than emit a slice
+          // Telegram would refuse.
           const pushRange = (from, to) => {
             let cursor = from;
             while (to - cursor > maxCssHeight) {

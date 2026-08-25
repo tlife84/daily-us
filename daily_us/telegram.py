@@ -114,6 +114,17 @@ class TelegramClient:
         admin_only: bool = False,
         silent: bool = False,
     ) -> list[str]:
+        """Send one photo to every recipient.
+
+        Args:
+            photo_path: PNG or JPEG file to send.
+            caption: Text shown under the photo.
+            admin_only: Send to the admin chat instead of the normal recipients.
+            silent: Deliver without a notification sound.
+
+        Returns:
+            One entry per recipient that still failed after the retries.
+        """
         url = f"https://api.telegram.org/bot{self.bot_token}/sendPhoto"
 
         def send_one(chat_id: str) -> None:
@@ -143,8 +154,17 @@ class TelegramClient:
     ) -> list[str]:
         """Send up to MAX_ALBUM_ITEMS photos as a single album message.
 
-        Callers must batch longer sequences themselves so that a retry only
-        repeats the album that actually failed.
+        Callers batch longer sequences themselves so that a retry only repeats the album that
+        actually failed.
+
+        Args:
+            photo_paths: Photos to place in the album, in order.
+            caption: Text shown under the first photo.
+            admin_only: Send to the admin chat instead of the normal recipients.
+            silent: Deliver without a notification sound.
+
+        Returns:
+            One entry per recipient that still failed after the retries.
         """
         if not photo_paths:
             raise ValueError("send_photo_album needs at least one photo.")
