@@ -40,6 +40,7 @@ class WatcherConfig:
     title_exclude_contains: tuple[str, ...]
     send_audio: bool
     send_pdf: bool
+    send_body_as_image: bool
     audio_filename_template: str | None
     only_today: bool
     active_days: tuple[int, ...] | None
@@ -137,6 +138,7 @@ def _parse_watcher(raw: dict[str, Any]) -> WatcherConfig:
         title_exclude_contains=tuple(str(item) for item in raw.get("title_exclude_contains", [])),
         send_audio=send_audio,
         send_pdf=send_pdf,
+        send_body_as_image=bool(raw.get("send_body_as_image", False)),
         audio_filename_template=audio_filename_template,
         only_today=bool(raw.get("only_today", False)),
         active_days=_parse_active_days(raw.get("active_days")),

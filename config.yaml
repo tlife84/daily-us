@@ -30,6 +30,7 @@ watchers:
     title_contains: "언제나 데이트"
     title_exclude_contains: ["영상"]
     send_audio: false
+    send_body_as_image: true
     active_hours: ["07:00", "22:00"]
     interval_minutes: 60
     max_posts_per_poll: 5

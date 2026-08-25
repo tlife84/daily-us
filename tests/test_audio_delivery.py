@@ -33,6 +33,7 @@ def _audio_watcher() -> WatcherConfig:
         title_exclude_contains=(),
         send_audio=True,
         send_pdf=False,
+        send_body_as_image=False,
         audio_filename_template="굿모닝 담쌤 {mm-dd}",
         only_today=True,
         active_days=None,

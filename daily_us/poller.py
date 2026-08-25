@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import logging
 import re
+import tempfile
 import time as time_module
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from daily_us.config import AppConfig, WatcherConfig
 from daily_us.site import AudioNotAvailableYet, LoginRequired, PostRef, UsInsightClient
 from daily_us.storage import SeenStore
-from daily_us.telegram import TelegramClient
+from daily_us.telegram import MAX_ALBUM_ITEMS, TelegramClient
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_SEED_LIMIT = 100
@@ -18,6 +20,19 @@ LOGIN_ALERT_COOLDOWN_MINUTES = 60
 POLL_FAILURE_ALERT_COOLDOWN_MINUTES = 60
 ADMIN_ALERT_RETRY_INTERVAL_SECONDS = 600
 ADMIN_ALERT_MAX_ATTEMPTS = 6
+
+
+@dataclass(frozen=True)
+class BodyDelivery:
+    """Outcome of one body delivery attempt.
+
+    ``ready`` separates "the post is still rendering, try again later" from a
+    real failure, so a post that is not finished yet does not page the admin
+    once an hour.
+    """
+
+    sent: bool
+    ready: bool = True
 
 
 def poll_once(
@@ -260,13 +275,16 @@ def _process_watcher(
                     post.title,
                 )
 
-            if _send_body_messages(telegram, content.body_text, post.title):
+            body = _deliver_body(
+                client, telegram, watcher, post, body_text=content.body_text
+            )
+            if body.sent:
                 store.mark_seen(watcher.name, post.post_id, post.title, post.url)
                 if has_pdf:
                     LOGGER.info("Sent body and PDF(s) to Telegram: %s", post.title)
                 else:
                     LOGGER.info("Sent PDF watcher post without PDF to Telegram: %s", post.title)
-            else:
+            elif body.ready:
                 _notify_poll_failure(
                     telegram,
                     watcher.name,
@@ -284,11 +302,11 @@ def _process_watcher(
                     post.title,
                 )
                 continue
-            body_text = client.fetch_post_body_text(post)
-            if _send_body_messages(telegram, body_text, post.title):
+            body = _deliver_body(client, telegram, watcher, post)
+            if body.sent:
                 store.mark_seen(watcher.name, post.post_id, post.title, post.url)
                 LOGGER.info("Sent body-only post to Telegram: %s", post.title)
-            else:
+            elif body.ready:
                 _notify_poll_failure(
                     telegram,
                     watcher.name,
@@ -552,9 +570,14 @@ def _process_latest_for_test(
 
             body_sent = False
             if documents_sent:
-                body_sent = _send_body_messages(
-                    telegram, content.body_text, post.title, admin_only=admin_only
-                )
+                body_sent = _deliver_body(
+                    client,
+                    telegram,
+                    watcher,
+                    post,
+                    body_text=content.body_text,
+                    admin_only=admin_only,
+                ).sent
 
             if body_sent and documents_sent:
                 LOGGER.info(
@@ -573,8 +596,7 @@ def _process_latest_for_test(
             continue
 
         if not watcher.send_audio:
-            body_text = client.fetch_post_body_text(post)
-            if _send_body_messages(telegram, body_text, post.title, admin_only=admin_only):
+            if _deliver_body(client, telegram, watcher, post, admin_only=admin_only).sent:
                 LOGGER.info(
                     "Sent latest body-only test post %s/%s to Telegram: %s",
                     index,
@@ -628,8 +650,7 @@ def _process_latest_body_for_test(
         return
 
     for index, post in enumerate(posts, start=1):
-        body_text = client.fetch_post_body_text(post)
-        if _send_body_messages(telegram, body_text, post.title, admin_only=admin_only):
+        if _deliver_body(client, telegram, watcher, post, admin_only=admin_only).sent:
             LOGGER.info(
                 "Sent latest body-only test post %s/%s to Telegram: %s",
                 index,
@@ -643,6 +664,63 @@ def _process_latest_body_for_test(
                 len(posts),
                 post.title,
             )
+
+
+def _deliver_body(
+    client: UsInsightClient,
+    telegram: TelegramClient,
+    watcher: WatcherConfig,
+    post: PostRef,
+    body_text: str | None = None,
+    admin_only: bool = False,
+) -> BodyDelivery:
+    if not watcher.send_body_as_image:
+        text = body_text if body_text is not None else client.fetch_post_body_text(post)
+        return BodyDelivery(
+            sent=_send_body_messages(telegram, text, post.title, admin_only=admin_only)
+        )
+
+    with tempfile.TemporaryDirectory(prefix="daily-us-body-") as temp_dir:
+        try:
+            captured = client.capture_post_body_images(post, Path(temp_dir))
+        except Exception:
+            LOGGER.exception("Failed to capture body images for post: %s", post.title)
+            return BodyDelivery(sent=False)
+
+        if not captured.is_ready:
+            LOGGER.info("Body is not ready to capture yet; will retry: %s", post.title)
+            return BodyDelivery(sent=False, ready=False)
+
+        sent = _send_body_images(
+            telegram, captured.image_paths, post.title, admin_only=admin_only
+        )
+    return BodyDelivery(sent=sent)
+
+
+def _send_body_images(
+    telegram: TelegramClient,
+    image_paths: list[Path],
+    post_title: str,
+    admin_only: bool = False,
+) -> bool:
+    if not image_paths:
+        LOGGER.warning("Body capture produced no images for post: %s", post_title)
+        return False
+
+    try:
+        for start in range(0, len(image_paths), MAX_ALBUM_ITEMS):
+            batch = image_paths[start : start + MAX_ALBUM_ITEMS]
+            # Only the first album rings. A post that arrives as a dozen photos
+            # should notify once, not once per album.
+            telegram.send_photo_album(
+                batch,
+                admin_only=admin_only,
+                silent=start > 0,
+            )
+    except Exception:
+        LOGGER.exception("Body image delivery failed for post: %s", post_title)
+        return False
+    return True
 
 
 def _send_body_messages(
