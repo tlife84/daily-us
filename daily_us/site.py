@@ -270,11 +270,11 @@ class UsInsightClient:
 
             LOGGER.info(
                 "Prepared body capture for %s: repaired %s data URI(s), hid %s overlay(s), "
-                "cover removed=%s, skipped section blocks=%s, unloaded images=%s",
+                "leading images removed=%s, skipped section blocks=%s, unloaded images=%s",
                 post.title,
                 prepared.get("repairedDataUris"),
                 prepared.get("hiddenOverlays"),
-                prepared.get("coverRemoved"),
+                prepared.get("leadingImagesRemoved"),
                 prepared.get("skippedSectionBlocks"),
                 prepared.get("brokenImages"),
             )
@@ -912,7 +912,7 @@ def _scroll_to_load_lazy_images(page: Page) -> None:
 def _prepare_page_for_body_capture(page: Page) -> dict[str, object]:
     """Repair broken images and strip everything that does not belong in the capture.
 
-    Removes the page chrome, the cover image and the trailing news briefing section.
+    Removes the page chrome, the images above the first line of text and the news briefing.
 
     Args:
         page: The post page to prepare.
@@ -978,14 +978,14 @@ def _prepare_page_for_body_capture(page: Page) -> dict[str, object]:
             sweepOverlays();
           }
 
-          let coverRemoved = false;
+          // 굿모닝 담쌤은 표지 그림 아래에 섹션 제목 띠까지 붙는다. 글자가 시작되기 전의 그림은
+          // 모두 겉치레라 함께 지운다.
+          let leadingImagesRemoved = 0;
           for (const child of editor.children) {
-            if (child.querySelector('img')) {
-              child.style.setProperty('display', 'none', 'important');
-              coverRemoved = true;
-              break;
-            }
             if ((child.innerText || '').trim()) break;
+            if (!child.querySelector('img')) continue;
+            child.style.setProperty('display', 'none', 'important');
+            leadingImagesRemoved += 1;
           }
 
           // The skipped section is its title banner followed by a run of news items and blank
@@ -1029,7 +1029,7 @@ def _prepare_page_for_body_capture(page: Page) -> dict[str, object]:
             editorFound: true,
             repairedDataUris,
             hiddenOverlays,
-            coverRemoved,
+            leadingImagesRemoved,
             skippedSectionBlocks,
             brokenImages,
           };
@@ -1064,26 +1064,53 @@ def _body_capture_layout(page: Page, max_css_height: int) -> dict[str, object] |
             });
           if (!rows.length) return null;
 
-          const chunks = [];
-          // A single block can exceed the limit on its own, so cut it rather than emit a slice
-          // Telegram would refuse.
-          const pushRange = (from, to) => {
-            let cursor = from;
-            while (to - cursor > maxCssHeight) {
-              chunks.push({ y: cursor, height: maxCssHeight });
-              cursor += maxCssHeight;
-            }
-            if (to - cursor > 4) chunks.push({ y: cursor, height: to - cursor });
-          };
+          // Telegram refuses a photo whose sides differ by more than 20 times, so a sliver of a
+          // slice fails the whole album. Every slice stays well clear of that ratio.
+          const minCssHeight = Math.ceil(rect.width / 6);
 
-          let start = rows[0].top;
-          for (const row of rows) {
-            if (row.bottom - start > maxCssHeight && row.top > start) {
-              pushRange(start, row.top);
-              start = row.top;
+          const boundaries = rows.map((row) => row.top);
+          boundaries.push(rows[rows.length - 1].bottom);
+
+          // Take as many whole blocks as fit, then cut at that boundary. A table split across two
+          // photos loses its header on the second one, so a block is only ever cut when the block
+          // alone is taller than the cap, and such a range is marked to be divided below.
+          const ranges = [];
+          let start = boundaries[0];
+          let index = 1;
+          while (index < boundaries.length) {
+            let end = -1;
+            let next = index;
+            while (next < boundaries.length && boundaries[next] - start <= maxCssHeight) {
+              end = boundaries[next];
+              next += 1;
+            }
+            const oversizedBlock = end === -1;
+            if (oversizedBlock) {
+              end = boundaries[index];
+              next = index + 1;
+            }
+            ranges.push({ from: start, to: end, oversizedBlock });
+            start = end;
+            index = next;
+          }
+
+          const last = ranges[ranges.length - 1];
+          if (ranges.length > 1 && last.to - last.from < minCssHeight) {
+            ranges.pop();
+            ranges[ranges.length - 1].to = last.to;
+          }
+
+          // Only a single block taller than the cap is divided, and into equal parts so that no
+          // part is a sliver.
+          const chunks = [];
+          for (const range of ranges) {
+            const span = range.to - range.from;
+            const parts = range.oversizedBlock ? Math.max(1, Math.ceil(span / maxCssHeight)) : 1;
+            const step = span / parts;
+            for (let part = 0; part < parts; part += 1) {
+              chunks.push({ y: range.from + step * part, height: Math.max(step, minCssHeight) });
             }
           }
-          pushRange(start, rows[rows.length - 1].bottom);
 
           return { left: rect.left + window.scrollX, width: rect.width, chunks };
         }
