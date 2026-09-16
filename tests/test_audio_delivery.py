@@ -37,8 +37,7 @@ def _audio_watcher(send_body_as_image: bool = False) -> WatcherConfig:
         send_body_as_image=send_body_as_image,
         audio_filename_template="굿모닝 담쌤 {mm-dd}",
         only_today=True,
-        active_days=None,
-        active_hours=None,
+        schedules=None,
         interval_minutes=10,
         max_posts_per_poll=5,
     )

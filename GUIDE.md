@@ -279,7 +279,7 @@ Start-ScheduledTask -TaskName "daily-us good morning"
 -m daily_us poll --watcher always_date
 ```
 
-`기업분석도감`은 일요일 12:00부터 20:00까지 1시간마다 실행하는 작업을 따로 만듭니다. 동작의 인수는 아래처럼 지정합니다.
+`기업분석도감`은 일요일 12:00부터 20:00까지, 화요일 19:00부터 22:00까지 1시간마다 실행하는 작업을 따로 만듭니다. 동작의 인수는 아래처럼 지정합니다.
 
 ```text
 -m daily_us poll --watcher company_analysis_guide
@@ -350,7 +350,7 @@ crontab -e
 0 12-20 * * 0 cd /path/to/daily-us && /path/to/daily-us/.venv/bin/python -m daily_us poll --watcher company_analysis_guide >> /path/to/daily-us/daily-us.log 2>&1
 ```
 
-이렇게 하면 `굿모닝 담쌤`은 7:00~8:50은 10분마다, 9:00과 9:10에도 실행되고, `언제나 데이트`는 7:00~22:00 정각마다 실행됩니다. `기업분석도감`은 일요일 12:00~20:00 정각마다 실행됩니다.
+이렇게 하면 `굿모닝 담쌤`은 7:00~8:50은 10분마다, 9:00과 9:10에도 실행되고, `언제나 데이트`는 7:00~22:00 정각마다 실행됩니다. `기업분석도감`은 일요일 12:00~20:00과 화요일 19:00~22:00 정각마다 실행됩니다.
 
 ## 8. 상시 실행 모드
 
@@ -391,8 +391,11 @@ watchers:
     title_contains: "기업분석도감"
     send_audio: false
     send_pdf: true
-    active_days: ["sun"]
-    active_hours: ["12:00", "20:00"]
+    schedules:
+      - days: ["sun"]
+        hours: ["12:00", "20:00"]
+      - days: ["tue"]
+        hours: ["19:00", "22:00"]
     interval_minutes: 60
     max_posts_per_poll: 5
 ```
@@ -416,5 +419,7 @@ watchers:
 사진은 10장씩 앨범으로 묶어 보내고, 첫 앨범만 알림이 울립니다. 본문이 아직 준비되지 않은 글은 전송하지 않고 다음 폴링에서 다시 확인합니다.
 
 `active_days`는 watcher가 실행될 요일을 제한합니다. `["sun"]`은 일요일만 실행한다는 뜻입니다.
+
+요일마다 시간대가 다르면 `active_days`/`active_hours` 대신 `schedules`를 씁니다. 항목마다 `days`와 `hours`를 한 벌로 적고, 그중 하나라도 맞으면 실행합니다. `기업분석도감`처럼 일요일 낮과 화요일 저녁을 함께 쓰는 경우입니다. `schedules`와 `active_days`/`active_hours`를 한 watcher에 같이 쓰면 오류가 납니다.
 
 `title_exclude_contains`는 제목/피드 카드 텍스트에 해당 키워드가 포함된 글을 제외합니다. `언제나 데이트` watcher는 영상 글을 제외하기 위해 `["영상"]`을 사용합니다.

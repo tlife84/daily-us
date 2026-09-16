@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import time
+from datetime import datetime, time
 from pathlib import Path
 from string import Formatter
 from typing import Any
@@ -34,6 +34,39 @@ class TelegramConfig:
 
 
 @dataclass(frozen=True)
+class ActiveWindow:
+    """One stretch of weekdays and hours a watcher runs in.
+
+    A watcher holds several of these, so its hours can differ per weekday.
+    """
+
+    days: tuple[int, ...] | None
+    hours: tuple[time, time] | None
+
+    def matches(self, now: datetime) -> bool:
+        """Whether the given moment falls inside this window.
+
+        Args:
+            now: Moment to test.
+
+        Returns:
+            True when the weekday and the time of day both match. A missing day or hour
+            list means that half places no limit.
+        """
+        if self.days is not None and now.weekday() not in self.days:
+            return False
+        if self.hours is None:
+            return True
+
+        start, end = self.hours
+        current = now.time()
+        # 끝 시각이 시작보다 이르면 자정을 넘기는 구간으로 읽는다
+        if start <= end:
+            return start <= current <= end
+        return current >= start or current <= end
+
+
+@dataclass(frozen=True)
 class WatcherConfig:
     name: str
     title_contains: str
@@ -43,24 +76,22 @@ class WatcherConfig:
     send_body_as_image: bool
     audio_filename_template: str | None
     only_today: bool
-    active_days: tuple[int, ...] | None
-    active_hours: tuple[time, time] | None
+    schedules: tuple[ActiveWindow, ...] | None
     interval_minutes: int
     max_posts_per_poll: int
 
-    def is_active_at(self, now: Any) -> bool:
-        if self.active_days is not None and now.weekday() not in self.active_days:
-            return False
-        return self.is_active_now(now.time())
+    def is_active_at(self, now: datetime) -> bool:
+        """Whether the watcher should poll at the given moment.
 
-    def is_active_now(self, now: time) -> bool:
-        if self.active_hours is None:
+        Args:
+            now: Moment to test.
+
+        Returns:
+            True when any of the watcher's windows matches, or when it has no window at all.
+        """
+        if self.schedules is None:
             return True
-
-        start, end = self.active_hours
-        if start <= end:
-            return start <= now <= end
-        return now >= start or now <= end
+        return any(window.matches(now) for window in self.schedules)
 
 
 @dataclass(frozen=True)
@@ -118,13 +149,6 @@ def _parse_watcher(raw: dict[str, Any]) -> WatcherConfig:
     if send_audio and send_pdf:
         raise ValueError(f"Watcher {name!r} cannot set both send_audio and send_pdf to true")
 
-    active_hours = raw.get("active_hours")
-    parsed_hours = None
-    if active_hours:
-        if len(active_hours) != 2:
-            raise ValueError("active_hours must contain exactly two HH:MM values")
-        parsed_hours = (_parse_time(active_hours[0]), _parse_time(active_hours[1]))
-
     audio_filename_template = (
         str(raw["audio_filename_template"])
         if raw.get("audio_filename_template") is not None
@@ -141,8 +165,7 @@ def _parse_watcher(raw: dict[str, Any]) -> WatcherConfig:
         send_body_as_image=bool(raw.get("send_body_as_image", False)),
         audio_filename_template=audio_filename_template,
         only_today=bool(raw.get("only_today", False)),
-        active_days=_parse_active_days(raw.get("active_days")),
-        active_hours=parsed_hours,
+        schedules=_parse_schedules(raw),
         interval_minutes=int(raw.get("interval_minutes", 10)),
         max_posts_per_poll=int(raw.get("max_posts_per_poll", 5)),
     )
@@ -164,6 +187,68 @@ def _validate_audio_filename_template(template: str | None) -> None:
             )
 
     template.format(title="title", date="01-01", **{"mm-dd": "01-01"})
+
+
+def _parse_schedules(raw: dict[str, Any]) -> tuple[ActiveWindow, ...] | None:
+    """Read a watcher's run windows from config.
+
+    Accepts either a `schedules` list, whose entries pair `days` with `hours`, or a single
+    `active_days` / `active_hours` pair for watchers that keep the same hours every day.
+
+    Args:
+        raw: Raw watcher mapping read from config.yaml.
+
+    Returns:
+        The windows the watcher runs in, or None when it is never held back.
+    """
+    schedules = raw.get("schedules")
+    has_single_window = raw.get("active_days") is not None or raw.get("active_hours") is not None
+    if schedules and has_single_window:
+        raise ValueError(
+            "schedules cannot be combined with active_days or active_hours; "
+            "move the single window into schedules"
+        )
+
+    if not schedules:
+        window = ActiveWindow(
+            days=_parse_active_days(raw.get("active_days")),
+            hours=_parse_hours(raw.get("active_hours")),
+        )
+        # 요일도 시각도 없으면 제한이 없는 워처로 둔다
+        if window.days is None and window.hours is None:
+            return None
+        return (window,)
+
+    if not isinstance(schedules, list):
+        raise ValueError("schedules must be a list of days/hours entries")
+
+    windows = []
+    for entry in schedules:
+        if not isinstance(entry, dict):
+            raise ValueError("Each schedules entry must be a mapping with days and/or hours")
+        windows.append(
+            ActiveWindow(
+                days=_parse_active_days(entry.get("days")),
+                hours=_parse_hours(entry.get("hours")),
+            )
+        )
+    return tuple(windows)
+
+
+def _parse_hours(values: Any) -> tuple[time, time] | None:
+    """Parse one start/end pair of HH:MM values.
+
+    Args:
+        values: Two HH:MM strings, or nothing when the window covers the whole day.
+
+    Returns:
+        The parsed start and end times, or None when no hours were given.
+    """
+    if not values:
+        return None
+    if len(values) != 2:
+        raise ValueError("Watcher hours must contain exactly two HH:MM values")
+    return (_parse_time(values[0]), _parse_time(values[1]))
 
 
 def _parse_time(value: str) -> time:
@@ -198,12 +283,12 @@ def _parse_active_days(values: Any) -> tuple[int, ...] | None:
     try:
         iterator = iter(values)
     except TypeError as exc:
-        raise ValueError("active_days must be a string, integer, or list") from exc
+        raise ValueError("Watcher days must be a string, integer, or list") from exc
 
     for value in iterator:
         if isinstance(value, int):
             if value < 0 or value > 6:
-                raise ValueError("active_days integer values must be between 0 and 6")
+                raise ValueError("Watcher day numbers must be between 0 and 6")
             parsed_days.append(value)
             continue
 

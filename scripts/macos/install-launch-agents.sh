@@ -72,6 +72,8 @@ EOF
 # 시각/간격/제한시간은 config.yaml 및 Windows 작업과 일치시킨다.
 install_agent 'com.daily-us.good-morning'           'good_morning_damsaem'   'good-morning'           540  "$(calendar_entries 07:00 09:10 10)"
 install_agent 'com.daily-us.always-date'            'always_date'            'always-date'            3000 "$(calendar_entries 07:00 22:00 60)"
-install_agent 'com.daily-us.company-analysis-guide' 'company_analysis_guide' 'company-analysis-guide' 3000 "$(calendar_entries 12:00 20:00 60 0)"
+install_agent 'com.daily-us.company-analysis-guide' 'company_analysis_guide' 'company-analysis-guide' 3000 \
+    "$(calendar_entries 12:00 20:00 60 0)
+$(calendar_entries 19:00 22:00 60 2)"
 
 echo 'daily-us launch agents installed.'

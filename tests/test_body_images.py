@@ -23,8 +23,7 @@ def _image_watcher(send_body_as_image: bool = True) -> WatcherConfig:
         send_body_as_image=send_body_as_image,
         audio_filename_template=None,
         only_today=False,
-        active_days=None,
-        active_hours=None,
+        schedules=None,
         interval_minutes=60,
         max_posts_per_poll=5,
     )

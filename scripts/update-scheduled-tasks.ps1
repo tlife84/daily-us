@@ -46,7 +46,8 @@ $jobs = @(
         TaskName = 'daily-us company analysis guide'
         Script   = 'poll-company-analysis-guide.ps1'
         Limit    = 'PT50M'
-        Triggers = (New-FixedTriggers -Start '12:00' -End '20:00' -IntervalMinutes 60 -DayOfWeek 'Sunday')
+        Triggers = (New-FixedTriggers -Start '12:00' -End '20:00' -IntervalMinutes 60 -DayOfWeek 'Sunday') +
+                   (New-FixedTriggers -Start '19:00' -End '22:00' -IntervalMinutes 60 -DayOfWeek 'Tuesday')
     }
 )
 
