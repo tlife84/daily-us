@@ -14,7 +14,7 @@ from daily_us.poller import (
     send_latest_body_for_test,
     send_latest_for_test,
 )
-from daily_us.site import UsInsightClient
+from daily_us.site import LoginRequired, UsInsightClient
 from daily_us.telegram import TelegramClient
 
 
@@ -123,8 +123,12 @@ def main() -> None:
             headless=False,
             navigation_timeout_ms=config.site.navigation_timeout_ms,
         )
-        with UsInsightClient(login_config) as client:
-            client.open_login_page()
+        try:
+            with UsInsightClient(login_config) as client:
+                client.open_login_page()
+        except LoginRequired as exc:
+            # 사용자 조작으로 중단된 로그인은 traceback 대신 재실행 안내와 실패 종료 코드 제공
+            raise SystemExit(str(exc)) from None
     elif args.command == "check-login":
         with UsInsightClient(config.site) as client:
             verified, url = client._verify_feed_access()

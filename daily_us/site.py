@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
 import re
 import subprocess
 import tempfile
+import time
 import unicodedata
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 from urllib.parse import unquote, urljoin, urlparse
 
 import imageio_ffmpeg
@@ -94,24 +97,22 @@ class UsInsightClient:
         self.browser: Browser | None = None
         self.context: BrowserContext | None = None
         self.body_capture_context: BrowserContext | None = None
+        # 인증 상태 읽기부터 브라우저 종료까지 유지하는 프로세스 간 잠금
+        self._session_lock = ExitStack()
 
     def __enter__(self) -> "UsInsightClient":
-        self._playwright = sync_playwright().start()
-        self.browser = self._playwright.chromium.launch(
-            headless=self.config.headless,
-        )
-
-        context_options = {
-            "viewport": {"width": 1366, "height": 900},
-            "accept_downloads": True,
-        }
-        auth_state = self._load_saved_auth_state()
-        if auth_state is not None:
-            context_options["storage_state"] = auth_state
-
-        self.context = self.browser.new_context(**context_options)
-        self._restore_session_storage(self.context)
-        self.context.set_default_timeout(self.config.navigation_timeout_ms)
+        # 같은 인증 파일을 사용하는 로그인·점검·폴링을 순서대로 실행
+        self._session_lock.enter_context(_lock_auth_state(self.config.auth_state_path))
+        try:
+            self._playwright = sync_playwright().start()
+            self.browser = self._playwright.chromium.launch(
+                headless=self.config.headless,
+            )
+            self.context = self._create_context()
+        except BaseException:
+            # 초기화 중 실패한 경우에도 브라우저 자원과 세션 잠금 해제
+            self.__exit__()
+            raise
         return self
 
     def __exit__(self, *_exc: object) -> None:
@@ -133,25 +134,67 @@ class UsInsightClient:
             except Exception:
                 LOGGER.exception("Failed to close browser.")
             finally:
-                if self._playwright:
-                    self._playwright.stop()
+                try:
+                    if self._playwright:
+                        self._playwright.stop()
+                finally:
+                    self._session_lock.close()
 
     def open_login_page(self) -> None:
+        """서버의 인증 성공과 피드 진입을 감지해 로그인 세션 자동 저장."""
         page = self._new_page()
+        authenticated = False
+
+        def on_response(response: Response) -> None:
+            """사이트의 현재 사용자 조회 응답으로 인증 성공 여부 확인.
+
+            Args:
+                response: 로그인 중 브라우저 컨텍스트에서 받은 응답.
+            """
+            nonlocal authenticated
+            parsed_url = urlparse(response.url)
+            # US Insight의 사용자 인증 응답만 사용. 만료된 쿠키나 로그인 전 피드 주소만으로 저장하지 않도록 제한
+            if (parsed_url.scheme, parsed_url.netloc, parsed_url.path) == (
+                "https", "api.us-insight.com", "/v3/auth/me"
+            ):
+                authenticated = response.status == 200
+
+        # 로그인 팝업에서 돌아온 피드도 확인할 수 있도록 같은 컨텍스트의 응답 수신
+        context = page.context
+        context.on("response", on_response)
         try:
+            print("브라우저에서 네이버 로그인과 동의·회원 연결을 완료하세요. 로그인 세션은 자동으로 저장됩니다.")
+            print("저장이 끝나면 브라우저가 자동으로 닫힙니다. 그때까지 창을 열어 두세요.")
             self._goto(page, self.config.feed_url)
             while True:
-                print("브라우저에서 네이버 로그인을 완료한 뒤, 이 터미널에서 Enter를 누르세요.")
-                input()
-                self._wait_for_auth_redirects(page)
-                verified, verify_url = self._verify_feed_access(save_state=True)
-                if verified:
-                    print("로그인 세션이 저장되었습니다.")
-                    return
-                print(f"아직 로그인된 피드가 아닙니다. 확인 URL: {verify_url}")
-                print("네이버 로그인, 동의, 회원 연결을 끝까지 완료한 뒤 다시 Enter를 누르세요.")
+                if authenticated:
+                    for candidate in context.pages:
+                        parsed_url = urlparse(candidate.url)
+                        is_feed = parsed_url.netloc == "us-insight.com" and parsed_url.path.startswith("/feed")
+                        # 본문 조회를 기다리는 동안 응답 콜백이 인증 상태를 바꿀 수 있으므로, 조회 완료 후 authenticated 재확인
+                        if is_feed and not self._is_logged_out(candidate) and authenticated:
+                            # 인증된 피드의 실제 쿠키와 저장소를 저장한 뒤에만 완료 안내
+                            self._save_auth_state(candidate)
+                            self._log_session_expiry(context)
+                            print("로그인 세션이 저장되었습니다.")
+                            return
+                # 터미널 입력 없이 브라우저 이벤트를 처리하며 로그인 완료 대기
+                page.wait_for_timeout(500)
+        except PlaywrightError as exc:
+            # 창 종료로 중단된 로그인에는 재실행 안내 제공. 다른 브라우저 오류는 그대로 전달
+            # 로그인 팝업만 닫힌 경우도 구분할 수 있도록 Playwright의 종료 메시지 확인
+            target_closed = "Target page, context or browser has been closed" in str(exc)
+            if not target_closed and not page.is_closed() and self.browser and self.browser.is_connected():
+                raise
+            raise LoginRequired(
+                "로그인 창이 닫혀 세션 저장을 완료하지 못했습니다. "
+                "`python -m daily_us login`을 다시 실행하고 브라우저에서 로그인을 완료하세요. "
+                "세션이 자동 저장되어 브라우저가 닫힐 때까지 창을 열어 두세요."
+            ) from None
         finally:
-            page.close()
+            context.remove_listener("response", on_response)
+            if not page.is_closed():
+                page.close()
 
     def find_posts(self, title_contains: str, max_posts: int) -> list[PostRef]:
         page = self._new_page()
@@ -222,6 +265,8 @@ class UsInsightClient:
                 body_ready=body.is_ready,
             )
         finally:
+            # 오디오 처리 중 갱신된 인증 상태도 페이지를 닫기 전에 저장
+            self._refresh_saved_session(page)
             page.close()
 
     def fetch_post_body_text(self, post: PostRef) -> str:
@@ -236,6 +281,8 @@ class UsInsightClient:
             self._wait_for_page_settle(page)
             return _post_body_from_page(page, post)
         finally:
+            # 본문 준비 여부와 관계없이 유효한 로그인 상태 저장
+            self._refresh_saved_session(page)
             page.close()
 
     def capture_post_body_images(self, post: PostRef, output_dir: Path) -> CapturedPostBody:
@@ -316,6 +363,8 @@ class UsInsightClient:
             )
             return CapturedPostBody(image_paths=image_paths, is_ready=True)
         finally:
+            # 모바일 캡처 컨텍스트에서 발급받은 최신 토큰 저장
+            self._refresh_saved_session(page)
             page.close()
 
     def _body_capture_context(self) -> BrowserContext:
@@ -325,7 +374,7 @@ class UsInsightClient:
         context instead of resizing that one.
 
         Returns:
-            The mobile context, shared by every capture in this session.
+            The mobile context, reused until the desktop context saves newer authentication state.
         """
         if self.body_capture_context is not None:
             return self.body_capture_context
@@ -340,13 +389,7 @@ class UsInsightClient:
             "user_agent": BODY_CAPTURE_MOBILE_USER_AGENT,
             "locale": "ko-KR",
         }
-        auth_state = self._load_saved_auth_state()
-        if auth_state is not None:
-            context_options["storage_state"] = auth_state
-
-        context = self.browser.new_context(**context_options)
-        self._restore_session_storage(context)
-        context.set_default_timeout(self.config.navigation_timeout_ms)
+        context = self._create_context(**context_options)
         self.body_capture_context = context
         return context
 
@@ -380,6 +423,8 @@ class UsInsightClient:
                 pdf_paths.append(self._download_pdf(pdf["url"], pdf["filename"], download_dir))
             return DownloadedPostContent(body_text=body_text, pdf_paths=pdf_paths)
         finally:
+            # PDF와 본문을 읽는 동안 갱신된 인증 상태 저장
+            self._refresh_saved_session(page)
             page.close()
 
     def _download_pdf(self, pdf_url: str, filename: str, download_dir: Path) -> Path:
@@ -602,9 +647,35 @@ class UsInsightClient:
 
         page.wait_for_timeout(3000)
 
+    def _create_context(self, **options: object) -> BrowserContext:
+        """최신 인증 파일로 브라우저 컨텍스트 생성.
+
+        Args:
+            options: 기본 데스크톱 설정을 덮어쓸 캡처용 브라우저 옵션.
+
+        Returns:
+            쿠키와 저장소를 복원한 컨텍스트.
+        """
+        if not self.browser:
+            raise RuntimeError("Browser is not open.")
+        context_options = {
+            "viewport": {"width": 1366, "height": 900},
+            "accept_downloads": True,
+            **options,
+        }
+        auth_state = self._load_saved_auth_state()
+        if auth_state is not None:
+            context_options["storage_state"] = auth_state
+        context = self.browser.new_context(**context_options)
+        self._restore_session_storage(context)
+        context.set_default_timeout(self.config.navigation_timeout_ms)
+        return context
+
     def _new_page(self) -> Page:
-        if not self.context:
-            raise RuntimeError("Browser context is not open.")
+        """최신 인증 상태를 사용하는 데스크톱 페이지 생성."""
+        # 모바일에서 인증 상태를 저장한 뒤에는 최신 파일로 다시 생성
+        if self.context is None:
+            self.context = self._create_context()
         return self.context.new_page()
 
     def _wait_for_network_idle(self, page: Page) -> None:
@@ -628,14 +699,15 @@ class UsInsightClient:
         except TimeoutError:
             LOGGER.debug("domcontentloaded timed out after interrupted navigation.")
 
-    def _wait_for_auth_redirects(self, page: Page) -> None:
-        for _ in range(30):
-            parsed_url = urlparse(page.url)
-            if parsed_url.netloc not in {"nid.naver.com", "api.us-insight.com"}:
-                return
-            page.wait_for_timeout(1000)
+    def _verify_feed_access(self, save_state: bool = True) -> tuple[bool, str]:
+        """피드 접근을 확인하고 성공한 점검에서 갱신된 인증 상태 저장.
 
-    def _verify_feed_access(self, save_state: bool = False) -> tuple[bool, str]:
+        Args:
+            save_state: 점검 중 갱신된 토큰을 다음 실행에서도 사용할지 여부.
+
+        Returns:
+            로그인 확인 결과와 확인한 페이지 주소.
+        """
         page = self._new_page()
         try:
             self._goto(page, self.config.feed_url)
@@ -678,22 +750,38 @@ class UsInsightClient:
         return "계정으로 로그인" in body and "비밀번호 찾기" in body
 
     def _refresh_saved_session(self, page: Page) -> None:
+        """로그인된 사이트 페이지의 최신 인증 상태 저장.
+
+        Args:
+            page: 피드 또는 게시글을 읽은 페이지.
+        """
         try:
+            # 다른 사이트나 로그인 화면의 상태로 인증 파일을 덮어쓰지 않도록 제한
+            if urlparse(page.url).netloc != urlparse(self.config.feed_url).netloc:
+                return
+            if self._is_logged_out(page):
+                return
             self._save_auth_state(page)
             LOGGER.info("Refreshed saved login session state.")
         except Exception:
             LOGGER.exception("Could not refresh the saved login session state.")
             return
-        self._log_session_expiry()
+        self._log_session_expiry(page.context)
 
-    def _log_session_expiry(self) -> None:
-        if not self.context:
+    def _log_session_expiry(self, context: BrowserContext | None = None) -> None:
+        """지정한 컨텍스트의 갱신 토큰 만료 시각 기록.
+
+        Args:
+            context: 토큰을 확인할 컨텍스트. 생략하면 데스크톱 컨텍스트 사용.
+        """
+        context = context or self.context
+        if not context:
             return
 
         try:
             cookies = {
                 cookie["name"]: cookie
-                for cookie in self.context.cookies([self.config.feed_url])
+                for cookie in context.cookies([self.config.feed_url])
             }
         except Exception:
             LOGGER.exception("Could not read cookies while checking session expiry.")
@@ -739,11 +827,21 @@ class UsInsightClient:
             return None
 
     def _save_auth_state(self, page: Page) -> None:
-        if not self.context:
-            raise RuntimeError("Browser context is not open.")
+        """페이지가 실제로 사용한 컨텍스트의 인증 상태 저장.
 
-        state = self.context.storage_state()
+        Args:
+            page: 최신 쿠키와 저장소를 가진 페이지.
+        """
+        context = page.context
+        state = context.storage_state()
         _write_json_atomically(self.config.auth_state_path, state)
+
+        # 다른 컨텍스트의 토큰은 재사용하지 않고 다음 접근 시 저장된 최신 상태로 복원
+        for attribute in ("context", "body_capture_context"):
+            other_context = getattr(self, attribute)
+            if other_context is not None and other_context is not context:
+                setattr(self, attribute, None)
+                other_context.close()
 
         origin = page.evaluate("() => window.location.origin")
         session_storage = page.evaluate(
@@ -784,6 +882,46 @@ class UsInsightClient:
         }})();
         """
         context.add_init_script(script=script)
+
+
+@contextmanager
+def _lock_auth_state(path: Path) -> Iterator[None]:
+    """인증 파일을 공유하는 프로세스의 브라우저 실행을 직렬화.
+
+    Args:
+        path: 실행 중 읽고 갱신할 인증 상태 파일 경로.
+
+    Yields:
+        읽기·토큰 갱신·저장이 모두 끝날 때까지 유지할 잠금 구간.
+    """
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # 고정 파일의 OS 잠금 사용. 프로세스가 강제 종료돼도 OS에서 잠금 해제
+    # 파일은 삭제하지 않아 대기 중인 프로세스도 동일한 파일을 잠그도록 유지
+    with lock_path.open("a+b") as handle:
+        LOGGER.info("Waiting for exclusive login session access: %s", lock_path)
+        if os.name == "nt":
+            import msvcrt
+
+            # Windows의 바이트 범위 잠금을 위한 첫 바이트 확보
+            if os.fstat(handle.fileno()).st_size == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as exc:
+                    if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                        raise
+                    time.sleep(0.1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        LOGGER.info("Acquired exclusive login session access.")
+        yield
 
 
 def _write_json_atomically(path: Path, payload: object) -> None:
