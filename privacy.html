@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="daily-us의 Google Drive 연동, Telegram 전송 및 개인정보 처리방침입니다.">
+  <title>개인정보처리방침 | daily-us</title>
+  <style>
+    body { margin: 0; padding: 32px 20px; color: #202124; background: #fff; font-family: system-ui, sans-serif; line-height: 1.8; }
+    main { max-width: 760px; margin: 0 auto; }
+    h1 { margin-bottom: 0; font-size: 1.9rem; }
+    h2 { margin-top: 32px; font-size: 1.2rem; }
+    a { color: #1558b0; overflow-wrap: anywhere; }
+    a:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+    .date { color: #5f6368; }
+    li { margin-bottom: 8px; }
+    footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid #dadce0; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>daily-us 개인정보처리방침</h1>
+    <p class="date">시행일: <time datetime="2026-09-23">2026년 9월 23일</time></p>
+    <p>daily-us는 사용자가 실행하는 게시글 알림 자동화 프로그램입니다. 설정한 게시글과 첨부파일을 확인하고, Telegram으로 전달하거나 Google Drive에 영상을 저장한 뒤 링크를 보냅니다. 이 방침은 프로그램의 개인정보 및 Google 사용자 데이터 처리에 적용됩니다.</p>
+
+    <h2>1. 처리하는 정보와 목적</h2>
+    <ul>
+      <li><strong>게시글 정보와 첨부파일:</strong> 사용자가 접근 권한을 가진 게시글의 제목, 주소, 게시일, 본문, 이미지, 오디오, PDF 및 영상을 조회하고 전달하기 위해 사용합니다.</li>
+      <li><strong>Google Drive 정보:</strong> 지정한 폴더와 파일의 이름, ID, 크기, 링크, 접근 권한 등 메타데이터를 조회합니다. 영상 업로드, 중복 업로드 방지, 전 주 영상 삭제 및 링크 전송에 사용합니다.</li>
+      <li><strong>인증 및 전송 정보:</strong> 사이트 로그인 세션, Google OAuth 토큰, Telegram 봇 토큰과 수신 채팅 ID를 인증과 예약 전송에 사용합니다. Google 계정 비밀번호는 프로그램이 수집하거나 저장하지 않습니다.</li>
+      <li><strong>처리 이력과 로그:</strong> 게시글 ID, 파일 ID, 전송 상태 및 오류 기록을 중복 처리 방지와 장애 확인에 사용합니다.</li>
+    </ul>
+
+    <h2>2. Google Drive 접근과 파일 삭제</h2>
+    <p>Google Drive 연동은 사용자의 OAuth 동의를 받아 실행됩니다. 사용자가 직접 올린 기존 영상도 관리하기 위해 Drive 파일 관리 권한을 요청하지만, 프로그램의 영상 조회·업로드·삭제 대상은 설정한 폴더로 제한합니다.</p>
+    <p>정규수업 영상은 다운로드를 완료한 후 지정 폴더의 정확히 전 주 날짜에 해당하는 MP4 파일을 영구 삭제하고 업로드합니다. 영구 삭제된 파일은 프로그램에서 복원할 수 없습니다.</p>
+
+    <h2>3. 보관 및 외부 서비스 전송</h2>
+    <p>인증 정보, 설정, 다운로드 파일과 처리 이력은 프로그램을 실행하는 컴퓨터에 저장됩니다. daily-us는 이 정보를 별도의 개발자 수집 서버로 보내지 않습니다.</p>
+    <p>사용자가 설정한 기능을 수행하는 데 필요한 영상과 파일 정보는 Google Drive로, 게시글·첨부파일·영상 링크와 운영 알림은 Telegram의 설정된 수신자에게 전송됩니다. Drive 파일을 볼 수 있는 범위는 해당 폴더와 파일의 공유 설정에 따릅니다. 각 외부 서비스의 데이터 처리에는 해당 서비스의 개인정보처리방침도 적용됩니다.</p>
+    <p>Google 사용자 데이터를 판매하거나 광고, 사용자 프로파일링 또는 범용 AI 모델 학습에 사용하지 않습니다. Google API에서 받은 정보의 사용과 다른 앱으로의 전송에는 <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>의 Limited Use 요건을 적용합니다.</p>
+
+    <h2>4. 보관 기간과 삭제 방법</h2>
+    <p>Google Drive 업로드가 완료된 정규수업 영상의 로컬 사본은 삭제합니다. 업로드에 실패한 영상은 재시도를 위해 남겨둡니다. 다른 다운로드 파일, 인증 정보, 처리 이력과 로그는 사용자가 삭제할 때까지 실행 컴퓨터에 보관될 수 있습니다.</p>
+    <p>사용자는 프로그램의 예약 실행을 중단하고 로컬 인증 파일, 다운로드, 이력과 로그를 삭제할 수 있습니다. Google 접근 권한은 <a href="https://myaccount.google.com/connections">Google 계정의 연결 관리</a>에서 철회할 수 있습니다. 권한을 철회해도 이미 Google Drive에 저장되거나 Telegram으로 전송된 자료는 자동 삭제되지 않으며, 해당 서비스에서 별도로 삭제해야 합니다.</p>
+
+    <h2>5. 이 페이지와 문의</h2>
+    <p>이 안내 페이지에는 광고·분석 스크립트나 개인정보 입력 양식을 사용하지 않습니다. 페이지 호스팅 과정에는 <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub의 개인정보처리방침</a>이 적용됩니다.</p>
+    <p>앱 관리자는 GitHub 사용자 <a href="https://github.com/tlife84">tlife84</a>입니다. 문의는 <a href="https://github.com/tlife84/daily-us/issues">daily-us 저장소의 Issues</a>로 접수할 수 있습니다. 공개 문의에는 비밀번호, 토큰 등 인증 정보를 포함하지 마세요.</p>
+    <p>처리 방식이 변경되면 이 페이지의 내용과 시행일을 갱신합니다.</p>
+
+    <footer><a href="./">daily-us 홈페이지</a> · <a href="https://github.com/tlife84/daily-us">소스 저장소</a></footer>
+  </main>
+</body>
+</html>
