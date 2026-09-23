@@ -69,7 +69,12 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 # ExecutionTimeLimit 대응: LIMIT 초 초과 시 강제 종료
-"$PYTHON" -m daily_us poll --watcher "$WATCHER" >> "$LOG" 2>&1 &
+# 정규수업은 잠자기 복귀로 늦게 시작해도 지정된 화요일 시간대 밖에서는 새 폴링 생략
+poll_args=(poll --watcher "$WATCHER")
+if [[ "$WATCHER" == "regular_class" ]]; then
+    poll_args+=(--respect-schedule)
+fi
+"$PYTHON" -m daily_us "${poll_args[@]}" >> "$LOG" 2>&1 &
 pid=$!
 ( sleep "$LIMIT" && kill -TERM "$pid" 2>/dev/null && sleep 10 && kill -KILL "$pid" 2>/dev/null ) &
 watchdog=$!

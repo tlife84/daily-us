@@ -3,7 +3,7 @@
 set -u
 
 GUI="gui/$(id -u)"
-for label in com.daily-us.good-morning com.daily-us.always-date com.daily-us.company-analysis-guide; do
+for label in com.daily-us.good-morning com.daily-us.always-date com.daily-us.company-analysis-guide com.daily-us.regular-class; do
     launchctl bootout "$GUI/$label" 2>/dev/null || true
     rm -f "$HOME/Library/LaunchAgents/$label.plist"
     echo "Removed $label"

@@ -291,15 +291,15 @@ macOS에서는 `launchd` LaunchAgent를 권장합니다. `cron`은 잠자기 중
 
 ### 스크립트로 설치 (권장)
 
-레포에 포함된 스크립트가 `config.yaml`의 스케줄과 동일한 고정 시각 트리거로 LaunchAgent 3개를 생성하고 등록합니다. 레포를 클론하고 `.venv`를 만든 뒤 실행합니다.
+레포에 포함된 스크립트가 `config.yaml`의 스케줄과 동일한 고정 시각 트리거로 LaunchAgent 4개를 생성하고 등록합니다. 레포를 클론하고 `.venv`를 만든 뒤 실행합니다. 정규수업을 포함하려면 아래 10절의 Drive 인증도 먼저 완료하세요.
 
 ```bash
 bash scripts/macos/install-launch-agents.sh
 ```
 
 - plist 생성 위치: `~/Library/LaunchAgents/com.daily-us.*.plist` (경로는 레포 위치에서 자동 계산)
-- 실행 래퍼: [scripts/macos/poll-watcher.sh](scripts/macos/poll-watcher.sh) — 시작/종료 로그, 복귀 직후 네트워크 대기(최대 90초), 실행 시간 제한(굿모닝 9분, 나머지 50분)을 처리합니다.
-- 로그: `logs/good-morning.log`, `logs/always-date.log`, `logs/company-analysis-guide.log` (launchd 자체 오류는 `logs/launchd-*.log`)
+- 실행 래퍼: [scripts/macos/poll-watcher.sh](scripts/macos/poll-watcher.sh) — 시작/종료 로그, 복귀 직후 네트워크 대기(최대 90초), 실행 시간 제한(굿모닝 9분, 정규수업 2시간, 나머지 50분)을 처리합니다.
+- 로그: `logs/good-morning.log`, `logs/always-date.log`, `logs/company-analysis-guide.log`, `logs/regular-class.log` (launchd 자체 오류는 `logs/launchd-*.log`)
 
 ### 자동 코드 갱신 (git pull)
 
@@ -398,17 +398,28 @@ watchers:
         hours: ["19:00", "22:00"]
     interval_minutes: 60
     max_posts_per_poll: 5
+
+  - name: "regular_class"
+    title_contains: "정규수업"
+    title_exclude_contains: ["미리보기"]
+    send_audio: false
+    send_video_to_drive: true
+    only_today: true
+    active_days: ["tue"]
+    active_hours: ["20:05", "22:04"]
+    interval_minutes: 5
+    max_posts_per_poll: 5
 ```
 
-`only_today: true`는 제목의 `M월 D일`이 오늘 날짜인 게시글만 처리합니다. 이전 날짜 글은 본문이나 오디오의 전송 상태와 관계없이 완료 처리하여 더 이상 붙잡지 않습니다.
+`only_today: true`는 제목의 `M월 D일`이 오늘 날짜인 게시글만 처리합니다. 이전 날짜 글은 본문이나 오디오의 전송 상태와 관계없이 완료 처리하여 더 이상 붙잡지 않습니다. 정규수업 영상은 예외로 제목 대신 API의 `publishedAt`을 한국 시간으로 비교하며, 과거 글을 완료 처리하지 않고 건너뜁니다.
 
 오디오 watcher가 `send_body_as_image: true`이면 본문은 오디오를 받은 페이지가 아니라 캡처 전용 페이지에서 따로 가져옵니다. 캡처에는 모바일 화면이 필요하기 때문입니다. 본문 사진을 먼저 보내고 오디오를 뒤이어 보내는 순서는 그대로입니다.
 
 오디오 watcher는 본문과 오디오의 전송 상태를 각각 저장합니다. 본문이 먼저 올라오면 본문을 즉시 한 번 보내고, 오디오가 아직 없으면 다음 폴링부터 본문은 건너뛰고 오디오만 확인합니다. `스크립트 준비중`은 fallback 본문의 시작 구분자로 건너뛰며, 그 뒤에 실제 본문이 없을 때만 미준비로 판단하여 다음 폴링에서 다시 확인합니다. 본문 전송에 실패해도 준비된 오디오는 독립적으로 전송합니다.
 
-당일 게시글은 본문과 오디오가 모두 전송되어야 `seen_posts`에 최종 완료 기록이 생깁니다. 단, 위의 `only_today` 규칙에 따라 날짜가 지난 게시글은 미완료 항목이 있더라도 강제로 완료 처리합니다.
+오디오 watcher의 당일 게시글은 본문과 오디오가 모두 전송되어야 `seen_posts`에 최종 완료 기록이 생깁니다. 단, 위의 `only_today` 규칙에 따라 날짜가 지난 게시글은 미완료 항목이 있더라도 강제로 완료 처리합니다.
 
-`send_audio: false`는 미디어 다운로드를 시도하지 않고 본문만 텔레그램으로 보냅니다.
+`send_audio: false`이고 `send_pdf`, `send_video_to_drive`도 꺼져 있으면 본문만 텔레그램으로 보냅니다.
 
 `send_pdf: true`는 게시글 API의 PDF 첨부를 다운로드해서 텔레그램 문서로 보냅니다.
 
@@ -423,3 +434,75 @@ watchers:
 요일마다 시간대가 다르면 `active_days`/`active_hours` 대신 `schedules`를 씁니다. 항목마다 `days`와 `hours`를 한 벌로 적고, 그중 하나라도 맞으면 실행합니다. `기업분석도감`처럼 일요일 낮과 화요일 저녁을 함께 쓰는 경우입니다. `schedules`와 `active_days`/`active_hours`를 한 watcher에 같이 쓰면 오류가 납니다.
 
 `title_exclude_contains`는 제목/피드 카드 텍스트에 해당 키워드가 포함된 글을 제외합니다. `언제나 데이트` watcher는 영상 글을 제외하기 위해 `["영상"]`을 사용합니다.
+
+## 10. 정규수업 동영상
+
+`regular_class` watcher는 매주 화요일 20:05, 20:10, …, 22:00에 총 24회 확인합니다. 게시글 제목/피드 카드에 `정규수업`이 포함된 후보에서 미리보기와 안내 글을 제외하고, 당일 게시된 본편 영상만 처리합니다. 게시일은 API의 `publishedAt`을 한국 시간으로 바꿔 판별합니다.
+
+영상은 **1080p(1920×1080)** 재생 목록을 선택해 재인코딩 없이 `downloads/regular-class/`의 게시글별 폴더에 MP4로 저장합니다. 1080p가 아직 제공되지 않으면 다음 폴링에서 재확인하며, 다운로드한 파일의 해상도와 HLS 원본 길이도 검사합니다. 파일명은 **게시일 하루 전 날짜**입니다. 예를 들어 2026-09-22에 게시된 영상은 `2026-09-21.mp4`가 됩니다.
+
+다운로드가 완료되면 [지정 Drive 폴더](https://drive.google.com/drive/folders/1MkoUwi6JhIvt1NmAFXPfDjIDPqS6_ZEc) 바로 아래에서 `2026-09-14.mp4`처럼 정확히 7일 전 날짜의 MP4만 영구 삭제하고 새 영상을 업로드합니다. 다른 날짜의 파일이나 다른 폴더는 정리하지 않습니다. 휴지통의 파일도 용량을 차지하므로 공간 확보에는 영구 삭제가 필요합니다. [Google Drive 삭제 안내](https://support.google.com/drive/answer/14933051?hl=en)
+
+업로드한 파일의 Drive 링크를 기존 `TELEGRAM_CHAT_IDS` 또는 `TELEGRAM_CHAT_ID` 수신자에게 보냅니다. 공유 권한은 대상 폴더에서 상속받습니다.
+
+### 최초 Google 인증
+
+Codex의 Google Drive 연결과 예약 실행하는 Python 프로그램의 인증은 별개입니다. Google 계정 비밀번호를 `.env`에 넣지 않습니다.
+
+1. [Google Cloud Console](https://console.cloud.google.com/)에서 프로젝트를 만들거나 선택하고 **Google Drive API**를 사용 설정합니다.
+2. **Google Auth Platform → 브랜딩**에서 앱 이름·지원 이메일·개발자 연락처를 설정합니다. 개인 Google 계정은 대상 유형을 **외부(External)**로 정하고, 테스트 중에는 자신의 계정을 테스트 사용자로 추가합니다. 프로덕션 전환을 위해 앱 소개 홈페이지와 개인정보처리방침의 실제 공개 URL, 해당 승인된 도메인도 등록합니다. 기존 공개 저장소의 GitHub Pages로 두 페이지를 제공할 수 있습니다. **앱 게시**가 비활성화되어 있으면 버튼에 마우스를 올려 누락된 항목을 확인합니다. [Google 브랜딩 설정 안내](https://support.google.com/cloud/answer/15549049?hl=en)
+3. **데이터 액세스(Data Access)**에 `https://www.googleapis.com/auth/drive` 범위를 추가합니다. 기존에 직접 올린 전 주 파일도 삭제해야 하므로 앱이 만든 파일만 다루는 `drive.file` 범위로는 부족합니다. 실제 프로그램의 파일 조회·삭제 범위는 `config.yaml`의 폴더와 날짜 파일명으로 제한합니다.
+4. **클라이언트(Clients) → 클라이언트 만들기 → 데스크톱 앱(Desktop app)**을 선택하고 JSON을 내려받아 `data/google_client_secret.json`으로 저장합니다. [Google의 데스크톱 앱 인증 정보 발급 안내](https://developers.google.com/workspace/guides/create-credentials#desktop-app)
+5. 주간 무인 실행 전에는 대상 설정의 게시 상태를 **프로덕션(In production)**으로 전환합니다. 외부 앱을 Testing 상태로 두면 Drive 권한을 가진 갱신 토큰은 7일 뒤 만료됩니다. 전환 후 아래 `drive-login`을 실행해 다시 인증합니다. [Google OAuth 토큰 만료 안내](https://developers.google.com/identity/protocols/oauth2#expiration)
+6. 예약 실행할 컴퓨터에서 가상환경을 활성화하고 다음 명령을 실행합니다. 폴더에 업로드하고 전 주 파일을 삭제할 수 있는 계정으로 브라우저 인증을 완료합니다.
+
+게시 상태의 **프로덕션 전환**과 **브랜딩 검증**은 별개입니다. 본인 계정으로 사용하는 개인용 앱은 OAuth 검증을 완료하지 않아도 사용할 수 있습니다. 본인이 만든 앱인지 확인한 뒤 로그인 화면의 미확인 앱 경고에서 계속 진행합니다. GitHub Pages의 HTML 인증 파일만으로 Google Cloud의 도메인 검증까지 완료되는 것은 아니며, 개인용 자동화를 위해 별도 도메인을 구입하거나 브랜딩 심사를 진행할 필요는 없습니다. [Google 개인용 앱 검증 예외 안내](https://support.google.com/cloud/answer/13464323?hl=en)
+
+```bash
+pip install -r requirements.txt
+python -m daily_us drive-login
+python -m daily_us check-drive
+```
+
+`drive-login`은 브라우저 동의 후 로컬 콜백을 받아 `data/google_drive_token.json`을 저장합니다. 인증 창은 최대 5분 기다립니다. `check-drive`는 토큰과 폴더 업로드 권한만 확인하며 파일을 변경하지 않습니다. 두 JSON은 Git에서 제외되는 `data/`에 보관합니다. 토큰이 취소되거나 만료되어 자동 갱신이 실패하면 `drive-login`을 다시 실행합니다.
+
+### 예약 작업 반영
+
+운영체제 예약 시각은 컴퓨터의 로컬 시간대를 따르므로 macOS·Windows의 시간대를 **서울(Asia/Seoul)**로 설정합니다. `python -m daily_us run`의 정규수업 판별은 OS 시간대와 무관하게 한국 시간을 사용합니다.
+
+macOS는 기존 설치 스크립트를 다시 실행하면 `com.daily-us.regular-class` 작업까지 등록됩니다.
+
+```bash
+bash scripts/macos/install-launch-agents.sh
+```
+
+Windows는 기존 작업들이 등록된 환경에서 관리자 PowerShell로 갱신 스크립트를 실행합니다. 새 `daily-us regular class` 작업은 기존 `daily-us company analysis guide`의 실행 계정을 사용합니다.
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\update-scheduled-tasks.ps1
+```
+
+두 운영체제의 정규수업 작업은 `poll --watcher regular_class --respect-schedule`을 실행합니다. 22:00 예약 실행의 시작 지연을 허용하기 위해 조회 가능 시간은 22:04분까지이며, 22:05 이후에는 놓친 조회를 시작하지 않습니다. 시간대 안에 시작한 다운로드·업로드는 종료 시각 이후에도 완료까지 진행하며, 같은 예약 작업의 중복 실행은 겹치지 않습니다. 영상 처리 중에는 새 폴링을 쌓지 않습니다.
+
+수동으로 당일 영상을 확인하려면 다음 명령을 사용합니다. 이 명령은 실제로 전 주 파일을 삭제하고 업로드 및 봇 전송을 수행하므로 Google 인증 후 실행합니다.
+
+```bash
+python -m daily_us poll --watcher regular_class
+```
+
+`test-latest`는 이력을 무시하는 명령이라 동영상 업로드를 제외합니다. `seed-seen`도 정규수업은 제외하여 오늘 영상을 실수로 완료 처리하지 않습니다.
+
+### 실패·재시도 동작
+
+- 영상이 아직 변환 중이면 완료 처리하지 않고 다음 5분 폴링에서 다시 확인합니다.
+- 다운로드 실패 시 전 주 영상은 삭제하지 않습니다. 삭제 또는 업로드 실패 시 완료된 로컬 MP4를 남겨 재사용합니다.
+- Google 공식 라이브러리의 분할 업로드로 전송 중 네트워크 오류를 재시도합니다. 업로드 ID는 전송 전에 SQLite에 저장하므로 완료 응답 유실이나 프로세스 재시작 후에도 같은 파일을 확인합니다.
+- 업로드 성공 후 로컬 MP4는 삭제합니다. 봇 전송만 실패하면 다음 폴링에서 같은 Drive 링크를 다시 보냅니다. 폴더에 동일 날짜의 MP4가 이미 하나 있으면 이를 재사용하며, 여러 개면 임의로 고르지 않고 오류를 알립니다.
+- 한계: 프로세스가 종료되면 진행 중이던 다운로드와 미완료 업로드는 처음부터 시작합니다. 필요하면 HLS 세그먼트 캐시와 Drive 재개 URI 저장으로 확장할 수 있습니다. 봇의 여러 수신자 중 일부만 전송에 실패한 경우 다음 폴링에서 이미 받은 수신자에게 링크가 다시 갈 수 있습니다.
+- 한계: 전 주 파일을 삭제한 뒤 업로드가 실패하면 Drive에서 전 주 영상을 되돌릴 수 없습니다. 새 영상의 로컬 파일은 보존합니다. 22:05 이후에는 자동 재시도를 시작하지 않으며, 그날이 지나면 `only_today`에 따라 과거 게시글을 건너뜁니다.
+
+로컬 검증:
+
+```bash
+python -m unittest discover -s tests -p 'test_video_delivery.py'
+```

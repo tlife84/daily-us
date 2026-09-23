@@ -48,12 +48,27 @@ $jobs = @(
         Limit    = 'PT50M'
         Triggers = (New-FixedTriggers -Start '12:00' -End '20:00' -IntervalMinutes 60 -DayOfWeek 'Sunday') +
                    (New-FixedTriggers -Start '19:00' -End '22:00' -IntervalMinutes 60 -DayOfWeek 'Tuesday')
+    },
+    @{
+        # 화요일 정규수업은 5분 간격 확인. 이미 진행 중인 대용량 전송에는 2시간 허용
+        TaskName = 'daily-us regular class'
+        Script   = 'poll-regular-class.ps1'
+        Limit    = 'PT2H'
+        Triggers = (New-FixedTriggers -Start '20:05' -End '22:00' -IntervalMinutes 5 -DayOfWeek 'Tuesday')
     }
 )
 
 foreach ($job in $jobs) {
     $scriptPath = Join-Path (Join-Path $root 'scripts') $job.Script
-    $task = Get-ScheduledTask -TaskName $job.TaskName
+    $task = Get-ScheduledTask -TaskName $job.TaskName -ErrorAction SilentlyContinue
+    if (-not $task -and $job.TaskName -eq 'daily-us regular class') {
+        # 기존 운영 작업의 실행 계정을 사용하여 새 정규수업 작업도 한 번에 등록
+        $template = Get-ScheduledTask -TaskName 'daily-us company analysis guide'
+        $newAction = New-ScheduledTaskAction -Execute 'C:\Program Files\PowerShell\7\pwsh.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" -WorkingDirectory $root
+        $newSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew
+        $task = Register-ScheduledTask -TaskName $job.TaskName -Action $newAction -Trigger $job.Triggers -Settings $newSettings -Principal $template.Principal
+    }
+    if (-not $task) { throw "Scheduled task not found: $($job.TaskName)" }
     $task.Settings.WakeToRun = $true
     $task.Settings.StartWhenAvailable = $true
     $task.Settings.ExecutionTimeLimit = $job.Limit
