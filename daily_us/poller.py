@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import tempfile
@@ -9,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from daily_us.config import AppConfig, WatcherConfig
+from daily_us.config import AppConfig, KST, WatcherConfig
 from daily_us.site import (
     AudioNotAvailableYet,
     LoginRequired,
@@ -19,6 +20,7 @@ from daily_us.site import (
 )
 from daily_us.storage import SeenStore
 from daily_us.telegram import MAX_ALBUM_ITEMS, TelegramClient
+from daily_us.video import VideoNotAvailableYet, download_video
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_SEED_LIMIT = 100
@@ -61,6 +63,9 @@ def poll_once(
 
     with UsInsightClient(config.site) as client:
         for watcher in watchers:
+            # 동영상은 인증 잠금 대기 후 시간대 재확인. 기존 워처는 선택한 조회를 그대로 수행
+            if watcher.send_video_to_drive and not ignore_schedule and not watcher.is_active_at(datetime.now()):
+                continue
             try:
                 _process_watcher(client, store, telegram, config, watcher)
             except LoginRequired as exc:
@@ -200,6 +205,9 @@ def run_forever(config: AppConfig) -> None:
             if due_watchers:
                 with UsInsightClient(config.site) as client:
                     for watcher in due_watchers:
+                        # 동영상만 시작 시각 재확인. 기존 워처는 이미 예정된 마지막 조회까지 수행
+                        if watcher.send_video_to_drive and not watcher.is_active_at(datetime.now()):
+                            continue
                         try:
                             _process_watcher(client, store, telegram, config, watcher)
                         except LoginRequired as exc:
@@ -219,9 +227,7 @@ def run_forever(config: AppConfig) -> None:
                                 exc,
                             )
                         finally:
-                            next_run[watcher.name] = datetime.now() + timedelta(
-                                minutes=watcher.interval_minutes
-                            )
+                            next_run[watcher.name] = _next_poll_at(watcher, datetime.now())
         except Exception as exc:
             LOGGER.exception("Poller loop failed; continuing after sleep.")
             try:
@@ -230,6 +236,30 @@ def run_forever(config: AppConfig) -> None:
                 LOGGER.exception("Failed while sending poller loop failure alert.")
         finally:
             time_module.sleep(30)
+
+
+def _next_poll_at(watcher: WatcherConfig, now: datetime) -> datetime:
+    """정규수업은 고정 시각 격자, 기존 워처는 처리 완료 후 간격으로 다음 실행 계산.
+
+    Args:
+        watcher: 실행을 마친 워처 설정.
+        now: 현재 시각. 반환값도 입력과 같은 시간대 사용.
+
+    Returns:
+        다음 폴링 시각.
+    """
+    interval = timedelta(minutes=watcher.interval_minutes)
+    if not watcher.send_video_to_drive:
+        return now + interval
+    current = now.astimezone(KST)
+    anchor = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    for window in watcher.schedules or ():
+        if window.matches(current.replace(second=0, microsecond=0)) and window.hours:
+            anchor = current.replace(
+                hour=window.hours[0].hour, minute=window.hours[0].minute, second=0, microsecond=0,
+            )
+            break
+    return now + interval - (current - anchor) % interval
 
 
 def _process_watcher(
@@ -248,6 +278,20 @@ def _process_watcher(
     for post in posts:
         if store.has_seen(watcher.name, post.post_id):
             LOGGER.info("Already sent: %s", post.title)
+            continue
+
+        if watcher.send_video_to_drive:
+            try:
+                _process_video_post(client, store, telegram, config, watcher, post)
+            except VideoNotAvailableYet:
+                LOGGER.info("Video is not available yet: %s", post.title)
+            except LoginRequired:
+                raise
+            except Exception as exc:
+                LOGGER.exception("Failed to deliver regular class video: %s", post.title)
+                _notify_poll_failure_with_cooldown(
+                    telegram, store, watcher.name, "failed to deliver video", exc, post,
+                )
             continue
 
         if watcher.send_pdf:
@@ -325,6 +369,67 @@ def _process_watcher(
             continue
 
         _process_audio_post(client, store, telegram, config, watcher, post)
+
+
+def _process_video_post(
+    client: UsInsightClient,
+    store: SeenStore,
+    telegram: TelegramClient,
+    config: AppConfig,
+    watcher: WatcherConfig,
+    post: PostRef,
+) -> None:
+    """본편 다운로드, 전 주 영상 삭제, Drive 업로드, 봇 링크 전달을 순서대로 수행.
+
+    Args:
+        client: 로그인된 게시글 조회 클라이언트.
+        store: 중복 전송 및 업로드 ID 저장소.
+        telegram: 기존 봇 수신자에게 링크를 전달할 클라이언트.
+        config: 저장 경로와 Drive 설정.
+        watcher: 정규수업 조회 설정.
+        post: 이번에 확인할 게시글.
+    """
+    video = client.fetch_post_video(post)
+    if video is None:
+        return
+    if watcher.only_today and video.published_at.astimezone(KST).date() != datetime.now(KST).date():
+        LOGGER.info("Skipping video not published today: %s", post.title)
+        return
+    if config.drive is None:
+        raise RuntimeError("Drive configuration is missing")
+    # Drive 의존성은 실제 동영상 전달 경로에서만 로드
+    from daily_us.drive import DriveClient
+
+    # 게시글별 경로로 불완전 파일과 다른 게시글의 다운로드를 분리
+    post_key = hashlib.sha256(post.post_id.encode()).hexdigest()[:20]
+    directory = config.storage.download_dir / "regular-class" / post_key
+    with DriveClient(config.drive) as drive:
+        drive.check_folder()
+        file_id = store.get_video_file_id(watcher.name, post.post_id)
+        uploaded = drive.get_video(file_id, video.filename) if file_id else None
+        if not file_id:
+            existing = drive.find_videos(video.filename)
+            if len(existing) > 1:
+                raise RuntimeError(f"Drive에 같은 이름의 영상이 여러 개 있습니다: {video.filename}")
+            if existing:
+                uploaded = drive.get_video(existing[0]["id"], video.filename)
+            file_id = uploaded["id"] if uploaded else drive.generate_id()
+            # 삭제·업로드 전에 ID 기록. 완료 응답을 받지 못해도 다음 시도에서 같은 ID 조회
+            store.save_video_file_id(watcher.name, post.post_id, file_id)
+        if uploaded is None:
+            path = download_video(video, directory)
+            drive.delete_previous_week(video.filename)
+            uploaded = drive.upload_video(path, file_id)
+        # 완료 응답 유실 뒤에도 원격 크기를 확인한 다음 로컬 파일 제거
+        local_path = directory / video.filename
+        if local_path.exists() and int(uploaded.get("size", 0)) != local_path.stat().st_size:
+            raise RuntimeError("Drive 영상과 로컬 영상의 크기가 달라 로컬 파일을 보존합니다.")
+        local_path.unlink(missing_ok=True)
+        link = uploaded.get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view"
+        # 한계: 일부 수신자만 실패하면 다음 폴링에서 전체 수신자에게 재전송. 필요 시 수신자별 전달 이력으로 확장 가능
+        telegram.send_message(f"정규수업 {video.filename.removesuffix('.mp4')}\n{link}")
+        store.mark_seen(watcher.name, post.post_id, post.title, post.url)
+        LOGGER.info("Delivered regular class video link: %s", video.filename)
 
 
 def _process_audio_post(
@@ -551,6 +656,10 @@ def _process_latest_for_test(
     limit: int,
     admin_only: bool = False,
 ) -> None:
+    # 이력 무시 테스트로 과거 수업의 원격 파일을 삭제하지 않도록 동영상 워처는 명시적으로 제외
+    if watcher.send_video_to_drive:
+        LOGGER.warning("Video upload is excluded from test-latest; use poll --watcher %s", watcher.name)
+        return
     LOGGER.info("Checking latest %s test post(s) for watcher: %s", limit, watcher.name)
     posts = client.find_posts(watcher.title_contains, limit)
     posts = _filter_excluded_posts(watcher, posts)
@@ -791,7 +900,8 @@ def _send_documents(
 
 
 def _filter_posts_for_watcher(watcher: WatcherConfig, posts: list[PostRef]) -> list[PostRef]:
-    if not watcher.only_today:
+    # 동영상 날짜는 제목에 없으므로 상세 API의 publishedAt으로 별도 판별
+    if not watcher.only_today or watcher.send_video_to_drive:
         return posts
 
     today = datetime.now()
@@ -826,6 +936,9 @@ def _filter_excluded_posts(watcher: WatcherConfig, posts: list[PostRef]) -> list
 
 
 def _filter_posts_for_seed(watcher: WatcherConfig, posts: list[PostRef]) -> list[PostRef]:
+    # 날짜가 없는 제목만으로 오늘 영상을 전송 완료 처리하지 않도록 seed 대상에서 제외
+    if watcher.send_video_to_drive:
+        return []
     if not watcher.only_today:
         return posts
 
@@ -848,7 +961,7 @@ def _mark_prior_posts_seen(
     watcher: WatcherConfig,
     posts: list[PostRef],
 ) -> None:
-    if not watcher.only_today:
+    if not watcher.only_today or watcher.send_video_to_drive:
         return
 
     today = datetime.now()

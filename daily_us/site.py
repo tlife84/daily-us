@@ -29,6 +29,7 @@ from playwright.sync_api import (
 )
 
 from daily_us.config import SiteConfig
+from daily_us.video import PostVideo, VideoNotAvailableYet, video_from_payload
 
 LOGGER = logging.getLogger(__name__)
 
@@ -266,6 +267,50 @@ class UsInsightClient:
             )
         finally:
             # 오디오 처리 중 갱신된 인증 상태도 페이지를 닫기 전에 저장
+            self._refresh_saved_session(page)
+            page.close()
+
+    def fetch_post_video(self, post: PostRef) -> PostVideo | None:
+        """게시글 API에서 본편 영상과 정확한 게시일 조회.
+
+        Args:
+            post: 피드에서 찾은 정규수업 후보 게시글.
+
+        Returns:
+            본편 영상 정보. 안내 글이나 미리보기는 None.
+        """
+        page = self._new_page()
+        payloads: list[dict] = []
+        api_path = f"/v2/contents/secret/{_post_cms_id_from_url(post.url)}"
+
+        def on_response(response: Response) -> None:
+            """현재 게시글의 사이트 API 응답만 수집.
+
+            Args:
+                response: 게시글을 여는 동안 브라우저에서 받은 응답.
+            """
+            parsed = urlparse(response.url)
+            if parsed.netloc == "api.us-insight.com" and parsed.path == api_path and response.ok:
+                try:
+                    payload = response.json()
+                except Exception:
+                    # 읽을 수 없는 응답은 다음 조회에서 재시도. 본문·서명 정보는 로그에서 제외
+                    LOGGER.warning("Could not read video post API response: %s", api_path)
+                    return
+                if isinstance(payload, dict):
+                    payloads.append(payload)
+
+        page.on("response", on_response)
+        try:
+            self._goto(page, post.url)
+            self._wait_for_network_idle(page)
+            self._wait_for_page_settle(page)
+            if self._is_logged_out(page):
+                raise LoginRequired("정규수업 조회에 실패했습니다. 사이트 로그인을 확인하세요.")
+            if not payloads:
+                raise VideoNotAvailableYet("Video post API response is not available yet")
+            return video_from_payload(payloads[-1], post.url)
+        finally:
             self._refresh_saved_session(page)
             page.close()
 

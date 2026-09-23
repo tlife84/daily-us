@@ -42,6 +42,9 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("login", help="Open a browser and save the logged-in session.")
     subparsers.add_parser("check-login", help="Verify whether the saved session can open the feed.")
+    # 예약 실행 전에 한 번 인증하고, 이후에는 읽기 전용 명령으로 폴더 접근 상태 점검
+    subparsers.add_parser("drive-login", help="Authorize Google Drive using a desktop OAuth client JSON.")
+    subparsers.add_parser("check-drive", help="Check Google Drive credentials and destination folder access.")
     subparsers.add_parser("telegram-updates", help="Print recent Telegram chat ids from getUpdates.")
     subparsers.add_parser("test-telegram", help="Send a small Telegram test message.")
     subparsers.add_parser("test-telegram-html", help="Send a small Telegram HTML formatting test.")
@@ -89,6 +92,10 @@ def main() -> None:
         "--watcher",
         help="Watcher name to poll. Defaults to all watchers.",
     )
+    poll_parser.add_argument(
+        "--respect-schedule", action="store_true",
+        help="Skip polling outside the watcher's configured days and hours.",
+    )
     seed_seen_parser = subparsers.add_parser(
         "seed-seen",
         help="Mark recent matching posts as seen without sending them.",
@@ -114,7 +121,19 @@ def main() -> None:
 
     config = load_config(args.config)
 
-    if args.command == "login":
+    if args.command in {"drive-login", "check-drive"}:
+        # Drive 전용 명령에서만 Google 인증·업로드 의존성 로드
+        from daily_us.drive import DriveClient, login_drive
+
+        if config.drive is None:
+            raise SystemExit("config.yaml에 drive 설정을 추가하세요.")
+        if args.command == "drive-login":
+            login_drive(config.drive)
+        else:
+            with DriveClient(config.drive) as drive:
+                drive.check_folder()
+        print("Google Drive 폴더 업로드 권한을 확인했습니다.")
+    elif args.command == "login":
         login_config = config.site.__class__(
             feed_url=config.site.feed_url,
             profile_dir=config.site.profile_dir,
@@ -181,7 +200,7 @@ def main() -> None:
             admin_only=args.admin,
         )
     elif args.command == "poll":
-        poll_once(config, ignore_schedule=True, watcher_name=args.watcher)
+        poll_once(config, ignore_schedule=not args.respect_schedule, watcher_name=args.watcher)
     elif args.command == "seed-seen":
         seed_seen_posts(config, watcher_name=args.watcher, limit=args.limit)
     elif args.command == "run":

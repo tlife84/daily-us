@@ -1,12 +1,25 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from string import Formatter
 from typing import Any
 
 import yaml
+
+# 정규수업의 게시일·예약 시각은 실행 컴퓨터의 시간대와 무관하게 한국 시간 사용
+KST = timezone(timedelta(hours=9), name="Asia/Seoul")
+
+
+@dataclass(frozen=True)
+class DriveConfig:
+    """예약 실행에 사용할 Drive 폴더와 개인 OAuth 인증 파일 경로."""
+
+    folder_id: str
+    client_secret_path: Path
+    token_path: Path
 
 
 @dataclass(frozen=True)
@@ -79,6 +92,7 @@ class WatcherConfig:
     schedules: tuple[ActiveWindow, ...] | None
     interval_minutes: int
     max_posts_per_poll: int
+    send_video_to_drive: bool = False
 
     def is_active_at(self, now: datetime) -> bool:
         """Whether the watcher should poll at the given moment.
@@ -89,6 +103,9 @@ class WatcherConfig:
         Returns:
             True when any of the watcher's windows matches, or when it has no window at all.
         """
+        if self.send_video_to_drive:
+            # 정규수업의 예약 창은 한국 시간 기준으로 판별하고 종료 시각의 해당 분 전체 포함
+            now = now.astimezone(KST).replace(second=0, microsecond=0)
         if self.schedules is None:
             return True
         return any(window.matches(now) for window in self.schedules)
@@ -100,6 +117,7 @@ class AppConfig:
     storage: StorageConfig
     telegram: TelegramConfig
     watchers: list[WatcherConfig]
+    drive: DriveConfig | None = None
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -113,6 +131,13 @@ def load_config(path: str | Path) -> AppConfig:
     storage = raw.get("storage", {})
     telegram = raw.get("telegram", {})
     watchers = raw.get("watchers", [])
+    # 동영상 워처가 켜져 있으면 대상 폴더 필수. 검색식에 쓰는 폴더 ID는 허용 문자만 수용
+    drive = raw.get("drive")
+    parsed_watchers = [_parse_watcher(item) for item in watchers]
+    if any(watcher.send_video_to_drive for watcher in parsed_watchers) and not drive:
+        raise ValueError("send_video_to_drive requires a drive configuration")
+    if drive and not re.fullmatch(r"[A-Za-z0-9_-]+", str(drive.get("folder_id", ""))):
+        raise ValueError("drive.folder_id must be a Google Drive folder ID")
 
     return AppConfig(
         site=SiteConfig(
@@ -138,7 +163,12 @@ def load_config(path: str | Path) -> AppConfig:
                 telegram.get("admin_chat_id_env", "TELEGRAM_ADMIN_CHAT_ID")
             ),
         ),
-        watchers=[_parse_watcher(item) for item in watchers],
+        watchers=parsed_watchers,
+        drive=DriveConfig(
+            folder_id=str(drive["folder_id"]),
+            client_secret_path=_resolve(base_dir, drive.get("client_secret_path", "data/google_client_secret.json")),
+            token_path=_resolve(base_dir, drive.get("token_path", "data/google_drive_token.json")),
+        ) if drive else None,
     )
 
 
@@ -146,6 +176,12 @@ def _parse_watcher(raw: dict[str, Any]) -> WatcherConfig:
     name = str(raw["name"])
     send_audio = bool(raw.get("send_audio", True))
     send_pdf = bool(raw.get("send_pdf", False))
+    send_video_to_drive = bool(raw.get("send_video_to_drive", False))
+    # 동영상 워처는 본문·오디오·PDF 전송과 분리된 하나의 전달 경로 사용
+    if send_video_to_drive and (send_audio or send_pdf or raw.get("send_body_as_image", False)):
+        raise ValueError(f"Watcher {name!r} cannot combine send_video_to_drive with other delivery modes")
+    if int(raw.get("interval_minutes", 10)) < 1:
+        raise ValueError("interval_minutes must be positive")
     if send_audio and send_pdf:
         raise ValueError(f"Watcher {name!r} cannot set both send_audio and send_pdf to true")
 
@@ -168,6 +204,7 @@ def _parse_watcher(raw: dict[str, Any]) -> WatcherConfig:
         schedules=_parse_schedules(raw),
         interval_minutes=int(raw.get("interval_minutes", 10)),
         max_posts_per_poll=int(raw.get("max_posts_per_poll", 5)),
+        send_video_to_drive=send_video_to_drive,
     )
 
 

@@ -3,3 +3,6 @@ python-dotenv==1.0.1
 PyYAML==6.0.2
 requests==2.32.3
 imageio-ffmpeg==0.6.0
+# Google OAuth 갱신과 대용량 재개 업로드는 공식 라이브러리 사용
+google-api-python-client==2.200.0
+google-auth-oauthlib==1.4.1

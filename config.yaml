@@ -16,6 +16,12 @@ telegram:
   chat_ids_env: "TELEGRAM_CHAT_IDS"
   admin_chat_id_env: "TELEGRAM_ADMIN_CHAT_ID"
 
+# 예약 실행 컴퓨터에서 drive-login으로 최초 인증. 인증 파일은 Git 제외 경로에 저장
+drive:
+  folder_id: "1MkoUwi6JhIvt1NmAFXPfDjIDPqS6_ZEc"
+  client_secret_path: "data/google_client_secret.json"
+  token_path: "data/google_drive_token.json"
+
 watchers:
   - name: "good_morning_damsaem"
     title_contains: "굿모닝 담쌤"
@@ -25,6 +31,20 @@ watchers:
     only_today: true
     active_hours: ["07:00", "09:10"]
     interval_minutes: 10
+    max_posts_per_poll: 5
+
+  - name: "regular_class"
+    title_contains: "정규수업"
+    title_exclude_contains: ["미리보기"]
+    send_audio: false
+    send_video_to_drive: true
+    # 제목 날짜 대신 API 게시일을 한국 시간으로 비교. 안내 글·미리보기 영상 제외
+    only_today: true
+    active_days: ["tue"]
+    # 22:00 예약의 시작 지연 허용. 22:05 정규 슬롯은 제외
+    # 한계: 22:05 이후 지연은 생략. 더 긴 복귀 지연은 예약 시각 기반 유예 판정으로 확장 필요
+    active_hours: ["20:05", "22:04"]
+    interval_minutes: 5
     max_posts_per_poll: 5
 
   - name: "always_date"

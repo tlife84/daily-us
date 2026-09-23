@@ -57,6 +57,38 @@ class SeenStore:
             return DeliveryStatus()
         return DeliveryStatus(body_sent=bool(row[0]), audio_sent=bool(row[1]))
 
+    def get_video_file_id(self, watcher_name: str, post_id: str) -> str | None:
+        """재시도에서도 동일한 Drive 파일을 사용하도록 저장한 ID 조회.
+
+        Args:
+            watcher_name: 동영상 워처 이름.
+            post_id: 게시글 식별자.
+
+        Returns:
+            사전 발급 또는 기존 파일의 ID. 기록이 없으면 None.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "select file_id from video_uploads where watcher_name = ? and post_id = ?",
+                (watcher_name, post_id),
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def save_video_file_id(self, watcher_name: str, post_id: str, file_id: str) -> None:
+        """업로드 전 파일 ID를 영속 저장하여 프로세스 재시작 시에도 재사용.
+
+        Args:
+            watcher_name: 동영상 워처 이름.
+            post_id: 게시글 식별자.
+            file_id: 사전 발급 또는 기존 파일의 ID.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                "insert into video_uploads (watcher_name, post_id, file_id) values (?, ?, ?) "
+                "on conflict(watcher_name, post_id) do update set file_id = excluded.file_id",
+                (watcher_name, post_id, file_id),
+            )
+
     def mark_body_sent(
         self,
         watcher_name: str,
@@ -147,6 +179,17 @@ class SeenStore:
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
+            # 업로드 ID는 완료 이력과 별도로 보존하여 알림 실패·재시작 후 중복 업로드 방지
+            conn.execute(
+                """
+                create table if not exists video_uploads (
+                    watcher_name text not null,
+                    post_id text not null,
+                    file_id text not null,
+                    primary key (watcher_name, post_id)
+                )
+                """
+            )
             conn.execute(
                 """
                 create table if not exists seen_posts (
