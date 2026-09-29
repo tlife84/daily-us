@@ -125,7 +125,8 @@ class VideoMetadataTest(unittest.TestCase):
 
     def test_skips_preview_and_text_posts(self) -> None:
         """제목 키워드가 같아도 미리보기와 안내 글은 다운로드하지 않음."""
-        for changes in [{"isPreview": True}, {"title": "정규수업 미리보기"}, {"mediaType": "TEXT"}]:
+        self.assertIsNotNone(video_from_payload(_payload(isPreview=True), "https://us-insight.com/secrets/1"))
+        for changes in [{"title": "정규수업 미리보기"}, {"mediaType": "TEXT"}]:
             self.assertIsNone(video_from_payload(_payload(**changes), "https://us-insight.com/secrets/1"))
 
     def test_rejects_missing_authority_date_or_untrusted_media(self) -> None:

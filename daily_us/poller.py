@@ -391,6 +391,7 @@ def _process_video_post(
     """
     video = client.fetch_post_video(post)
     if video is None:
+        LOGGER.info("Skipping non-video or preview post: %s", post.title)
         return
     if watcher.only_today and video.published_at.astimezone(KST).date() != datetime.now(KST).date():
         LOGGER.info("Skipping video not published today: %s", post.title)

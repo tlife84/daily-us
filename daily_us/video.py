@@ -48,7 +48,9 @@ def video_from_payload(payload: dict, post_url: str) -> PostVideo | None:
     content = payload.get("content")
     if not isinstance(content, dict):
         raise VideoNotAvailableYet("Post content is not available yet")
-    if content.get("isPreview") or "미리보기" in str(content.get("title", "")):
+    # API의 isPreview는 미리보기 영상 표시가 아니라 게시 상태 플래그로, 본편 게시 직후에도 true로 내려옴.
+    # 미리보기 영상은 제목으로만 구분
+    if "미리보기" in str(content.get("title", "")):
         return None
     if content.get("mediaType") != "VIDEO":
         return None
