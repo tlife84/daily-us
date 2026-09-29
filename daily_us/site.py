@@ -197,7 +197,7 @@ class UsInsightClient:
             if not page.is_closed():
                 page.close()
 
-    def find_posts(self, title_contains: str, max_posts: int) -> list[PostRef]:
+    def find_posts(self, category_contains: str, max_posts: int) -> list[PostRef]:
         page = self._new_page()
         try:
             LOGGER.info("Opening feed: %s", self.config.feed_url)
@@ -212,8 +212,8 @@ class UsInsightClient:
                     "Run `python -m daily_us check-login` first; if it fails consistently, "
                     "run `python -m daily_us login` and complete Naver login before polling."
                 )
-            posts = self._extract_post_links(page, title_contains, max_posts)
-            LOGGER.info("Found %s candidate posts for title filter %r", len(posts), title_contains)
+            posts = self._extract_post_links(page, category_contains, max_posts)
+            LOGGER.info("Found %s candidate posts for category filter %r", len(posts), category_contains)
             self._refresh_saved_session(page)
             return posts
         finally:
@@ -599,27 +599,60 @@ class UsInsightClient:
             header_lines.append(f"Cookie: {cookie_header}")
         return "\r\n".join(header_lines) + "\r\n"
 
-    def _extract_post_links(self, page: Page, title_contains: str, max_posts: int) -> list[PostRef]:
+    def _extract_post_links(self, page: Page, category_contains: str, max_posts: int) -> list[PostRef]:
+        """피드 카드 중 카테고리 라벨에 키워드가 들어간 게시글만 피드 순서대로 수집.
+
+        제목에 키워드가 있어도 카테고리가 다르면 제외.
+        학기마다 `투자학교 가을학기 기업분석도감`처럼 라벨 앞부분이 바뀌므로 완전 일치 대신 포함 여부로 비교.
+
+        Args:
+            page: 로그인된 피드 페이지.
+            category_contains: 카테고리 라벨에 포함돼야 하는 키워드. 비어 있으면 카테고리가 있는 모든 게시글 카드.
+            max_posts: 최대 수집 개수.
+
+        Returns:
+            수집한 게시글. 제목은 제외 키워드·날짜 판별에 쓰도록 카드 전체 텍스트 유지.
+        """
         LOGGER.info("Extracting post links from feed.")
-        raw_links = page.evaluate(
+        result = page.evaluate(
             """
-            ({ titleContains, maxPosts }) => {
+            ({ categoryContains, maxPosts }) => {
               const links = [];
+              let uncategorized = 0;
               for (const anchor of Array.from(document.querySelectorAll('a[href]'))) {
                 const title = (anchor.innerText || anchor.textContent || '')
                   .replace(/\\s+/g, ' ')
                   .trim();
                 const href = anchor.getAttribute('href');
                 if (!title || !href) continue;
-                if (titleContains && !title.includes(titleContains)) continue;
+                // 게시글 카드 머리의 버튼은 [글 유형, 카테고리] 순서의 span 두 개로 구성
+                const label = anchor.querySelector('button > span:nth-of-type(2)');
+                if (!label) {
+                  // 메뉴 링크 등 카테고리가 없는 링크는 제외. 키워드가 보이는 경우만 화면 구조 변경 신호로 집계
+                  if (categoryContains && title.includes(categoryContains)) uncategorized += 1;
+                  continue;
+                }
+                const category = (label.innerText || label.textContent || '')
+                  .replace(/\\s+/g, ' ')
+                  .trim();
+                if (categoryContains && !category.includes(categoryContains)) continue;
                 links.push({ title, href });
                 if (links.length >= maxPosts) break;
               }
-              return links;
+              return { links, uncategorized };
             }
             """,
-            {"titleContains": title_contains, "maxPosts": max_posts},
+            {"categoryContains": category_contains, "maxPosts": max_posts},
         )
+        # 카테고리를 못 읽어 건너뛴 카드는 전송 누락으로 이어지므로 경고로 남김
+        if result["uncategorized"]:
+            LOGGER.warning(
+                "Skipped %s feed link(s) mentioning %r without a category label; "
+                "the feed card layout may have changed.",
+                result["uncategorized"],
+                category_contains,
+            )
+        raw_links = result["links"]
 
         posts: list[PostRef] = []
         for raw_link in raw_links:

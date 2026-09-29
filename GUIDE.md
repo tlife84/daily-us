@@ -369,7 +369,7 @@ python -m daily_us run
 ```yaml
 watchers:
   - name: "good_morning_damsaem"
-    title_contains: "굿모닝 담쌤"
+    category_contains: "굿모닝 담쌤"
     send_audio: true
     send_body_as_image: true
     audio_filename_template: "굿모닝 담쌤 {mm-dd}"
@@ -379,7 +379,7 @@ watchers:
     max_posts_per_poll: 5
 
   - name: "always_date"
-    title_contains: "언제나 데이트"
+    category_contains: "언제나 데이트"
     title_exclude_contains: ["영상"]
     send_audio: false
     send_body_as_image: true
@@ -388,7 +388,7 @@ watchers:
     max_posts_per_poll: 5
 
   - name: "company_analysis_guide"
-    title_contains: "기업분석도감"
+    category_contains: "기업분석도감"
     send_audio: false
     send_pdf: true
     schedules:
@@ -400,7 +400,7 @@ watchers:
     max_posts_per_poll: 5
 
   - name: "regular_class"
-    title_contains: "정규수업"
+    category_contains: "정규수업"
     title_exclude_contains: ["미리보기"]
     send_audio: false
     send_video_to_drive: true
@@ -410,6 +410,8 @@ watchers:
     interval_minutes: 5
     max_posts_per_poll: 5
 ```
+
+`category_contains`는 피드 카드의 카테고리 라벨에 이 단어가 들어간 글만 가져옵니다. 학기마다 `투자학교 가을학기 기업분석도감`처럼 라벨 앞부분이 바뀌어도 포함 여부로 비교하므로 설정을 고치지 않아도 됩니다. `[학급반장 통신문] … 기업분석도감 …`처럼 다른 카테고리 글의 제목에 같은 단어가 있어도 가져오지 않습니다. `title_exclude_contains`는 지금처럼 카드 전체 텍스트와 비교하므로 `영상` 같은 글 유형 라벨로도 제외할 수 있습니다.
 
 `only_today: true`는 제목의 `M월 D일`이 오늘 날짜인 게시글만 처리합니다. 이전 날짜 글은 본문이나 오디오의 전송 상태와 관계없이 완료 처리하여 더 이상 붙잡지 않습니다. 정규수업 영상은 예외로 제목 대신 API의 `publishedAt`을 한국 시간으로 비교하며, 과거 글을 완료 처리하지 않고 건너뜁니다.
 

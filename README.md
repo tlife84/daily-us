@@ -105,17 +105,17 @@ python -m daily_us run
 ```yaml
 watchers:
   - name: "good_morning_damsaem"
-    title_contains: "굿모닝 담샘"
+    category_contains: "굿모닝 담쌤"
     active_hours: ["07:00", "09:10"]
     interval_minutes: 10
     max_posts_per_poll: 5
 ```
 
-`굿모닝 담샘`은 오전 7시부터 9시 10분까지 10분 간격으로 확인합니다. 다른 게시글을 확장하려면 `watchers`에 항목을 추가하면 됩니다.
+`굿모닝 담쌤` 카테고리 글을 오전 7시부터 9시 10분까지 10분 간격으로 확인합니다. `category_contains`는 피드 카드의 카테고리 라벨과 비교하므로 다른 카테고리 글은 제목에 같은 단어가 있어도 가져오지 않습니다. 다른 게시글을 확장하려면 `watchers`에 항목을 추가하면 됩니다.
 
 ```yaml
   - name: "another_post"
-    title_contains: "확인할 제목"
+    category_contains: "확인할 카테고리"
     interval_minutes: 30
     max_posts_per_poll: 5
 ```

@@ -161,7 +161,7 @@ def _seed_seen_for_watcher(
         watcher.name,
         limit,
     )
-    posts = client.find_posts(watcher.title_contains, limit)
+    posts = client.find_posts(watcher.category_contains, limit)
     posts = _filter_excluded_posts(watcher, posts)
     posts_to_seed = _filter_posts_for_seed(watcher, posts)
     seeded_count = 0
@@ -270,7 +270,7 @@ def _process_watcher(
     watcher: WatcherConfig,
 ) -> None:
     LOGGER.info("Checking watcher: %s", watcher.name)
-    posts = client.find_posts(watcher.title_contains, watcher.max_posts_per_poll)
+    posts = client.find_posts(watcher.category_contains, watcher.max_posts_per_poll)
     _mark_prior_posts_seen(store, watcher, posts)
     posts = _filter_excluded_posts(watcher, posts)
     posts = _filter_posts_for_watcher(watcher, posts)
@@ -661,7 +661,7 @@ def _process_latest_for_test(
         LOGGER.warning("Video upload is excluded from test-latest; use poll --watcher %s", watcher.name)
         return
     LOGGER.info("Checking latest %s test post(s) for watcher: %s", limit, watcher.name)
-    posts = client.find_posts(watcher.title_contains, limit)
+    posts = client.find_posts(watcher.category_contains, limit)
     posts = _filter_excluded_posts(watcher, posts)
     if not posts:
         LOGGER.info("No candidate post found for watcher: %s", watcher.name)
@@ -761,7 +761,7 @@ def _process_latest_body_for_test(
     admin_only: bool = False,
 ) -> None:
     LOGGER.info("Checking latest %s body-only test post(s) for watcher: %s", limit, watcher.name)
-    posts = client.find_posts(watcher.title_contains, limit)
+    posts = client.find_posts(watcher.category_contains, limit)
     posts = _filter_excluded_posts(watcher, posts)
     if not posts:
         LOGGER.info("No candidate post found for watcher: %s", watcher.name)

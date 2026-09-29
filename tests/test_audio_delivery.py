@@ -30,7 +30,7 @@ from daily_us.storage import SeenStore
 def _audio_watcher(send_body_as_image: bool = False) -> WatcherConfig:
     return WatcherConfig(
         name="good_morning_damsaem",
-        title_contains="굿모닝 담쌤",
+        category_contains="굿모닝 담쌤",
         title_exclude_contains=(),
         send_audio=True,
         send_pdf=False,

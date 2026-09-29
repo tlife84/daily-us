@@ -82,7 +82,7 @@ class ActiveWindow:
 @dataclass(frozen=True)
 class WatcherConfig:
     name: str
-    title_contains: str
+    category_contains: str
     title_exclude_contains: tuple[str, ...]
     send_audio: bool
     send_pdf: bool
@@ -177,6 +177,9 @@ def _parse_watcher(raw: dict[str, Any]) -> WatcherConfig:
     send_audio = bool(raw.get("send_audio", True))
     send_pdf = bool(raw.get("send_pdf", False))
     send_video_to_drive = bool(raw.get("send_video_to_drive", False))
+    # 옛 키가 남은 설정은 새 키 없이 키워드가 비어 모든 게시글을 전송할 수 있으므로 시작 단계에서 중단
+    if "title_contains" in raw:
+        raise ValueError(f"Watcher {name!r} uses title_contains; rename it to category_contains")
     # 동영상 워처는 본문·오디오·PDF 전송과 분리된 하나의 전달 경로 사용
     if send_video_to_drive and (send_audio or send_pdf or raw.get("send_body_as_image", False)):
         raise ValueError(f"Watcher {name!r} cannot combine send_video_to_drive with other delivery modes")
@@ -194,7 +197,7 @@ def _parse_watcher(raw: dict[str, Any]) -> WatcherConfig:
 
     return WatcherConfig(
         name=name,
-        title_contains=str(raw.get("title_contains", "")),
+        category_contains=str(raw.get("category_contains", "")),
         title_exclude_contains=tuple(str(item) for item in raw.get("title_exclude_contains", [])),
         send_audio=send_audio,
         send_pdf=send_pdf,

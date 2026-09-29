@@ -16,7 +16,7 @@ from daily_us.telegram import MAX_ALBUM_ITEMS
 def _image_watcher(send_body_as_image: bool = True) -> WatcherConfig:
     return WatcherConfig(
         name="always_date",
-        title_contains="언제나 데이트",
+        category_contains="언제나 데이트",
         title_exclude_contains=("영상",),
         send_audio=False,
         send_pdf=False,
