@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -496,6 +496,25 @@ class DriveVideoTest(unittest.TestCase):
         self.drive.service = Mock()
         self.files = self.drive.service.files.return_value
 
+    def _use_folder(self, names: list[str]) -> dict[str, dict]:
+        """조회식에 적힌 파일명과 같은 MP4만 돌려주는 대상 폴더 구성.
+
+        Args:
+            names: 폴더 바로 아래에 있는 yyyy-mm-dd.mp4 파일명.
+
+        Returns:
+            파일명별 메타데이터. 값을 바꾸면 이후 단건 조회 결과에 반영.
+        """
+        files = {
+            name: {"id": name, "name": name, "mimeType": "video/mp4", "parents": ["folder-1"], "size": "42"}
+            for name in names
+        }
+        self.files.list.side_effect = lambda **kwargs: Mock(execute=Mock(return_value={
+            "files": [item for name, item in files.items() if f"name = '{name}'" in kwargs["q"]],
+        }))
+        self.files.get.side_effect = lambda **kwargs: Mock(execute=Mock(return_value=files[kwargs["fileId"]]))
+        return files
+
     def test_web_credentials_are_rejected_before_opening_browser(self) -> None:
         """웹 앱용 인증 파일이면 브라우저를 열기 전에 데스크톱 앱 발급 안내."""
         with tempfile.TemporaryDirectory() as temporary:
@@ -509,19 +528,31 @@ class DriveVideoTest(unittest.TestCase):
                 factory.return_value.run_local_server.assert_not_called()
 
     def test_only_previous_week_in_target_folder_is_deleted(self) -> None:
-        """연도 경계에서도 정확히 7일 전 MP4를 조회하고 해당 ID만 삭제."""
-        old = {"id": "old", "name": "2025-12-29.mp4", "mimeType": "video/mp4", "parents": ["folder-1"], "size": "42"}
-        self.files.list.return_value.execute.return_value = {"files": [old]}
-        self.files.get.return_value.execute.return_value = old
-        self.drive.delete_previous_week("2026-01-05.mp4")
-        query = self.files.list.call_args.kwargs["q"]
-        self.assertEqual(query, "'folder-1' in parents and name = '2025-12-29.mp4' and mimeType = 'video/mp4' and trashed = false")
-        self.files.delete.assert_called_once_with(fileId="old", supportsAllDrives=True)
+        """수업일이 월·화요일로 바뀌어도 6~8일 전 MP4만 조회해 삭제하고 5·9일 전 파일은 유지."""
+        for new, previous in [
+            ("2026-01-05.mp4", "2025-12-29.mp4"),  # 평소 주. 연도 경계의 7일 전 월요일
+            ("2026-10-06.mp4", "2026-09-28.mp4"),  # 월요일 공휴일 주. 화요일 수업의 8일 전 월요일
+            ("2026-10-12.mp4", "2026-10-06.mp4"),  # 그다음 주. 월요일 수업의 6일 전 화요일
+        ]:
+            with self.subTest(new=new):
+                self.files.reset_mock()
+                lesson = date.fromisoformat(new.removesuffix(".mp4"))
+                kept = [f"{(lesson - timedelta(days=days)).isoformat()}.mp4" for days in (5, 9)]
+                self._use_folder([previous, *kept])
+                self.drive.delete_previous_week(new)
+                expected_queries = [
+                    f"'folder-1' in parents and name = '{(lesson - timedelta(days=days)).isoformat()}.mp4' "
+                    "and mimeType = 'video/mp4' and trashed = false"
+                    for days in (6, 7, 8)
+                ]
+                self.assertEqual([call.kwargs["q"] for call in self.files.list.call_args_list], expected_queries)
+                self.files.delete.assert_called_once_with(fileId=previous, supportsAllDrives=True)
 
     def test_moved_file_and_invalid_name_cannot_be_deleted(self) -> None:
         """조회 후 다른 폴더로 옮긴 파일과 잘못된 날짜는 삭제 거부."""
-        self.files.list.return_value.execute.return_value = {"files": [{"id": "old"}]}
-        self.files.get.return_value.execute.return_value = {"id": "old", "name": "2026-09-14.mp4", "mimeType": "video/mp4", "parents": ["another-folder"], "size": "42"}
+        files = self._use_folder(["2026-09-14.mp4"])
+        # 목록 조회와 단건 재확인 사이에 다른 폴더로 옮겨진 상황
+        files["2026-09-14.mp4"]["parents"] = ["another-folder"]
         with self.assertRaises(RuntimeError):
             self.drive.delete_previous_week("2026-09-21.mp4")
         with self.assertRaises(ValueError):
@@ -531,10 +562,11 @@ class DriveVideoTest(unittest.TestCase):
     def test_pagination_and_missing_previous_week(self) -> None:
         """조회 페이지를 모두 확인하고 전 주 파일이 없으면 삭제 생략."""
         self.files.list.return_value.execute.side_effect = [
-            {"files": [], "nextPageToken": "page-2"}, {"files": []},
+            {"files": [], "nextPageToken": "page-2"}, {"files": []}, {"files": []}, {"files": []},
         ]
         self.drive.delete_previous_week("2026-09-21.mp4")
-        self.assertEqual(self.files.list.call_args.kwargs["pageToken"], "page-2")
+        # 6일 전 조회는 두 쪽을 모두 확인하고 7·8일 전은 한 쪽씩 조회
+        self.assertEqual([call.kwargs["pageToken"] for call in self.files.list.call_args_list], [None, "page-2", None, None])
         self.files.delete.assert_not_called()
 
     def test_only_not_found_allows_upload(self) -> None:

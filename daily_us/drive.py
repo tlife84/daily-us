@@ -170,23 +170,26 @@ class DriveClient:
         return self.service.files().generateIds(count=1, space="drive").execute(num_retries=3)["ids"][0]
 
     def delete_previous_week(self, filename: str) -> None:
-        """정확히 전 주 날짜의 MP4만 영구 삭제하여 저장 공간 확보.
+        """전 주 수업일 날짜의 MP4만 영구 삭제하여 저장 공간 확보.
 
         Args:
-            filename: 새로 업로드할 영상 파일명. 이 날짜에서 7일 전만 삭제.
+            filename: 새로 업로드할 영상 파일명. 이 날짜의 6~8일 전 날짜만 삭제.
         """
-        previous = _lesson_date(filename) - timedelta(days=7)
-        for candidate in self.find_videos(f"{previous.isoformat()}.mp4"):
-            # 조회 이후 이동·이름 변경 여부를 재확인한 뒤 해당 파일만 삭제
-            item = self.get_video(candidate["id"], f"{previous.isoformat()}.mp4")
-            if item is None:
-                continue
-            LOGGER.info("Deleting previous week's video: %s (%s)", item["name"], item["id"])
-            try:
-                self.service.files().delete(fileId=item["id"], supportsAllDrives=True).execute(num_retries=3)
-            except HttpError as exc:
-                if exc.resp.status != 404:
-                    raise
+        lesson_date = _lesson_date(filename)
+        # 수업일은 월요일이고 월요일이 공휴일인 주만 화요일이라 전 주 영상은 6~8일 전에 있음. 주에 한 번만 올리므로 다른 주 영상은 범위 밖
+        for days_back in (6, 7, 8):
+            previous = f"{(lesson_date - timedelta(days=days_back)).isoformat()}.mp4"
+            for candidate in self.find_videos(previous):
+                # 조회 이후 이동·이름 변경 여부를 재확인한 뒤 해당 파일만 삭제
+                item = self.get_video(candidate["id"], previous)
+                if item is None:
+                    continue
+                LOGGER.info("Deleting previous week's video: %s (%s)", item["name"], item["id"])
+                try:
+                    self.service.files().delete(fileId=item["id"], supportsAllDrives=True).execute(num_retries=3)
+                except HttpError as exc:
+                    if exc.resp.status != 404:
+                        raise
 
     def upload_video(self, path: Path, file_id: str) -> dict:
         """고정 ID로 영상을 분할 업로드하고 완료된 원격 파일의 크기 확인.
