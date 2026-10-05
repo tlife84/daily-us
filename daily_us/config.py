@@ -93,9 +93,31 @@ class WatcherConfig:
     interval_minutes: int
     max_posts_per_poll: int
     send_video_to_drive: bool = False
+    # 기본 요일에 완료한 글이 없을 때만 같은 시간대로 조회하는 보조 요일
+    fallback_days: tuple[int, ...] = ()
+
+    def fallback_since(self, now: datetime) -> datetime | None:
+        """보조 요일 조회 전에 완료 기록을 확인할 시작 시각 계산.
+
+        Args:
+            now: 판별할 시각.
+
+        Returns:
+            보조 요일이면 직전 기본 요일의 0시. 보조 요일이 아니면 None.
+        """
+        if self.send_video_to_drive:
+            # is_active_at과 같이 정규수업 요일은 한국 시간으로 판별
+            now = now.astimezone(KST)
+        if now.weekday() not in self.fallback_days:
+            return None
+        # 기본 요일은 active_days 창 하나이며 보조 요일과 겹치지 않으므로 1~6일 전 중 가장 가까운 날 선택
+        days_back = min((now.weekday() - day) % 7 for day in self.schedules[0].days)
+        return (now - timedelta(days=days_back)).replace(hour=0, minute=0, second=0, microsecond=0)
 
     def is_active_at(self, now: datetime) -> bool:
-        """Whether the watcher should poll at the given moment.
+        """Whether the given moment falls inside one of the watcher's windows.
+
+        Fallback-day windows match here too. The poller checks their delivery history separately.
 
         Args:
             now: Moment to test.
@@ -195,6 +217,18 @@ def _parse_watcher(raw: dict[str, Any]) -> WatcherConfig:
     )
     _validate_audio_filename_template(audio_filename_template)
 
+    schedules = _parse_schedules(raw)
+    fallback_days = _parse_active_days(raw.get("fallback_days")) or ()
+    if fallback_days:
+        # 보조 요일은 기본 요일 창의 시간대를 그대로 쓰고 직전 기본 요일을 찾아야 하므로 active_days 단일 창에서만 허용
+        active_days = _parse_active_days(raw.get("active_days"))
+        if not active_days or set(active_days) & set(fallback_days):
+            raise ValueError(
+                f"Watcher {name!r} fallback_days requires active_days without schedules, "
+                "and the two day lists must not overlap"
+            )
+        schedules = (*schedules, ActiveWindow(days=fallback_days, hours=schedules[0].hours))
+
     return WatcherConfig(
         name=name,
         category_contains=str(raw.get("category_contains", "")),
@@ -204,10 +238,11 @@ def _parse_watcher(raw: dict[str, Any]) -> WatcherConfig:
         send_body_as_image=bool(raw.get("send_body_as_image", False)),
         audio_filename_template=audio_filename_template,
         only_today=bool(raw.get("only_today", False)),
-        schedules=_parse_schedules(raw),
+        schedules=schedules,
         interval_minutes=int(raw.get("interval_minutes", 10)),
         max_posts_per_poll=int(raw.get("max_posts_per_poll", 5)),
         send_video_to_drive=send_video_to_drive,
+        fallback_days=fallback_days,
     )
 
 

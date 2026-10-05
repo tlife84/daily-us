@@ -77,7 +77,9 @@ install_agent 'com.daily-us.company-analysis-guide' 'company_analysis_guide' 'co
 $(calendar_entries 19:00 22:00 60 2)"
 
 # 정규수업은 화요일 20:05부터 22:00까지 24회 확인. 진행 중 다운로드·업로드는 2시간까지 허용
+# 수요일 같은 시각에도 실행하되, 화요일에 전달한 영상이 있으면 Python이 조회 없이 종료
 install_agent 'com.daily-us.regular-class' 'regular_class' 'regular-class' 7200 \
-    "$(calendar_entries 20:05 22:00 5 2)"
+    "$(calendar_entries 20:05 22:00 5 2)
+$(calendar_entries 20:05 22:00 5 3)"
 
 echo 'daily-us launch agents installed.'

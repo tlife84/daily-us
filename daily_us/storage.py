@@ -4,7 +4,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -25,6 +25,25 @@ class SeenStore:
             row = conn.execute(
                 "select 1 from seen_posts where watcher_name = ? and post_id = ?",
                 (watcher_name, post_id),
+            ).fetchone()
+        return row is not None
+
+    def has_seen_since(self, watcher_name: str, since: datetime) -> bool:
+        """지정 시각 이후 완료 처리한 게시글이 있는지 확인.
+
+        Args:
+            watcher_name: 워처 이름.
+            since: 확인 시작 시각. 시간대가 없으면 실행 컴퓨터의 로컬 시간으로 해석.
+
+        Returns:
+            시작 시각 이후 완료 기록이 하나라도 있으면 True.
+        """
+        # seen_at은 SQLite current_timestamp 기본값이라 UTC 'YYYY-MM-DD HH:MM:SS' 문자열로 비교
+        threshold = since.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            row = conn.execute(
+                "select 1 from seen_posts where watcher_name = ? and seen_at >= ?",
+                (watcher_name, threshold),
             ).fetchone()
         return row is not None
 

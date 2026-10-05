@@ -12,7 +12,7 @@ function New-FixedTriggers {
         [Parameter(Mandatory)] [string]$Start,
         [Parameter(Mandatory)] [string]$End,
         [Parameter(Mandatory)] [int]$IntervalMinutes,
-        [string]$DayOfWeek  # 지정 시 주간 트리거, 미지정 시 매일 트리거
+        [string[]]$DayOfWeek  # 지정 시 주간 트리거(여러 요일 가능), 미지정 시 매일 트리거
     )
     $t = [datetime]::ParseExact($Start, 'HH:mm', $null)
     $endT = [datetime]::ParseExact($End, 'HH:mm', $null)
@@ -51,10 +51,11 @@ $jobs = @(
     },
     @{
         # 화요일 정규수업은 5분 간격 확인. 이미 진행 중인 대용량 전송에는 2시간 허용
+        # 수요일 같은 시각에도 실행하되, 화요일에 전달한 영상이 있으면 Python이 조회 없이 종료
         TaskName = 'daily-us regular class'
         Script   = 'poll-regular-class.ps1'
         Limit    = 'PT2H'
-        Triggers = (New-FixedTriggers -Start '20:05' -End '22:00' -IntervalMinutes 5 -DayOfWeek 'Tuesday')
+        Triggers = (New-FixedTriggers -Start '20:05' -End '22:00' -IntervalMinutes 5 -DayOfWeek 'Tuesday', 'Wednesday')
     }
 )
 

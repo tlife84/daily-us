@@ -15,7 +15,9 @@ from googleapiclient.errors import HttpError
 
 from daily_us.config import DriveConfig, KST, _parse_watcher, load_config
 from daily_us.drive import DriveClient, login_drive
-from daily_us.poller import _next_poll_at, _process_latest_for_test, _process_watcher, poll_once, run_forever
+from daily_us.poller import (
+    _next_poll_at, _process_latest_for_test, _process_watcher, _should_poll, poll_once, run_forever,
+)
 from daily_us.site import PostRef, UsInsightClient
 from daily_us.storage import SeenStore
 from daily_us.video import PostVideo, VideoNotAvailableYet, download_video, video_from_payload
@@ -239,8 +241,47 @@ class VideoScheduleTest(unittest.TestCase):
         self.assertTrue(self.watcher.is_active_at(first.astimezone(timezone.utc)))
         self.assertTrue(self.watcher.is_active_at(slots[-1] + timedelta(minutes=1, seconds=10)))
         self.assertTrue(self.watcher.is_active_at(slots[-1] + timedelta(minutes=4, seconds=59)))
-        for outside in [first - timedelta(seconds=1), slots[-1] + timedelta(minutes=5), first + timedelta(days=1)]:
+        for outside in [first - timedelta(seconds=1), slots[-1] + timedelta(minutes=5), first + timedelta(days=2)]:
             self.assertFalse(self.watcher.is_active_at(outside))
+
+    def test_wednesday_polls_only_without_delivery_since_tuesday(self) -> None:
+        """화요일 0시(한국 시간) 이후 전달 기록이 없을 때만 수요일 같은 시간대에 조회."""
+        tuesday = datetime(2026, 10, 6, 20, 5, tzinfo=KST)
+        wednesday = tuesday + timedelta(days=1)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SeenStore(Path(temporary) / "seen.db")
+
+            def deliver(post_id: str, seen_at_utc: str) -> None:
+                """mark_seen과 같은 UTC 형식으로 지정 시각의 완료 기록 추가."""
+                with store._connect() as conn:
+                    conn.execute(
+                        "insert into seen_posts (watcher_name, post_id, post_title, post_url, seen_at) "
+                        "values (?, ?, '', '', ?)",
+                        (self.watcher.name, post_id, seen_at_utc),
+                    )
+
+            # 지난주 전달과 화요일 0시 직전(월요일 23:59:59 한국 시간) 기록은 수요일 조회를 막지 않음
+            deliver("last-week", "2026-09-29 11:52:13")
+            deliver("before-tuesday", "2026-10-05 14:59:59")
+            self.assertEqual(self.watcher.fallback_since(wednesday), datetime(2026, 10, 6, tzinfo=KST))
+            self.assertTrue(_should_poll(store, self.watcher, wednesday))
+            self.assertTrue(_should_poll(store, self.watcher, wednesday.replace(hour=22, minute=4)))
+            for outside in [wednesday.replace(hour=22, minute=5), wednesday + timedelta(days=1)]:
+                self.assertFalse(_should_poll(store, self.watcher, outside))
+            # 화요일 0시 이후 전달하면 수요일 조회만 생략하고 화요일 조회는 그대로 유지
+            deliver("this-week", "2026-10-05 15:00:00")
+            self.assertFalse(_should_poll(store, self.watcher, wednesday))
+            self.assertTrue(_should_poll(store, self.watcher, tuesday))
+
+    def test_fallback_days_require_separate_active_days(self) -> None:
+        """보조 요일은 겹치지 않는 active_days 단일 창과 함께 쓸 때만 허용."""
+        for raw in [
+            {"fallback_days": ["wed"]},
+            {"active_days": ["tue", "wed"], "fallback_days": ["wed"]},
+            {"schedules": [{"days": ["tue"], "hours": ["20:05", "22:04"]}], "fallback_days": ["wed"]},
+        ]:
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                _parse_watcher({"name": "bad", **raw})
 
     def test_polling_does_not_drift_after_processing_time(self) -> None:
         """완료 시각이 20:06:37이어도 다음 조회는 20:10에 예약."""
@@ -264,6 +305,7 @@ class VideoScheduleTest(unittest.TestCase):
                     watcher = Mock(name="watcher", send_video_to_drive=video)
                     watcher.interval_minutes = 5
                     watcher.is_active_at.side_effect = [True, False]
+                    watcher.fallback_since.return_value = None
                     config = replace(base, watchers=[watcher])
                     with patch("daily_us.poller.SeenStore"), patch("daily_us.poller.TelegramClient"), \
                             patch("daily_us.poller.UsInsightClient"), \

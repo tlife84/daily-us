@@ -54,7 +54,7 @@ def poll_once(
         watcher
         for watcher in config.watchers
         if (watcher_name is None or watcher.name == watcher_name)
-        and (ignore_schedule or watcher.is_active_at(now))
+        and (ignore_schedule or _should_poll(store, watcher, now))
     ]
 
     if not watchers:
@@ -199,7 +199,7 @@ def run_forever(config: AppConfig) -> None:
             due_watchers = [
                 watcher
                 for watcher in config.watchers
-                if watcher.is_active_at(now) and now >= next_run[watcher.name]
+                if _should_poll(store, watcher, now) and now >= next_run[watcher.name]
             ]
 
             if due_watchers:
@@ -260,6 +260,24 @@ def _next_poll_at(watcher: WatcherConfig, now: datetime) -> datetime:
             )
             break
     return now + interval - (current - anchor) % interval
+
+
+def _should_poll(store: SeenStore, watcher: WatcherConfig, now: datetime) -> bool:
+    """예약 시간대이면서 보조 요일 조건도 충족하는지 판별.
+
+    Args:
+        store: 완료 기록 저장소.
+        watcher: 판별할 워처 설정.
+        now: 판별할 시각.
+
+    Returns:
+        예약 조회를 진행하면 True. 보조 요일에는 직전 기본 요일 0시 이후 완료 기록이 없을 때만 True.
+    """
+    if not watcher.is_active_at(now):
+        return False
+    since = watcher.fallback_since(now)
+    # 화요일에 이미 영상을 전달한 주에는 수요일 조회 생략
+    return since is None or not store.has_seen_since(watcher.name, since)
 
 
 def _process_watcher(
