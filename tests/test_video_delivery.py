@@ -115,11 +115,11 @@ class VideoMetadataTest(unittest.TestCase):
                 run.assert_not_called()
 
     def test_uses_published_date_instead_of_title_or_current_date(self) -> None:
-        """게시일 하루 전 파일명과 연도·한국 시간 자정 경계 확인."""
+        """한국 시간 게시일 파일명과 연도·자정 경계 확인."""
         for published, filename in [
-            ("2026-09-22T11:00:31Z", "2026-09-21.mp4"),
-            ("2025-12-31T15:00:00Z", "2025-12-31.mp4"),
-            ("2026-02-28T16:00:00Z", "2026-02-28.mp4"),
+            ("2026-09-22T11:00:31Z", "2026-09-22.mp4"),
+            ("2025-12-31T15:00:00Z", "2026-01-01.mp4"),
+            ("2026-02-28T16:00:00Z", "2026-03-01.mp4"),
         ]:
             with self.subTest(published=published):
                 video = video_from_payload(_payload(publishedAt=published), "https://us-insight.com/secrets/1")
@@ -157,12 +157,12 @@ class VideoMetadataTest(unittest.TestCase):
 
             with patch("daily_us.video.subprocess.run", side_effect=write_video) as run:
                 path = download_video(video, directory)
-                self.assertEqual(path.name, "2026-09-21.mp4")
+                self.assertEqual(path.name, "2026-09-22.mp4")
                 self.assertEqual(path.read_bytes(), b"video")
                 download_video(video, directory)
                 run.assert_called_once()
             path.unlink()
-            partial = directory / "2026-09-21.part.mp4"
+            partial = directory / "2026-09-22.part.mp4"
             partial.write_bytes(b"incomplete")
             with patch("daily_us.video.subprocess.run", return_value=SimpleNamespace(returncode=1)):
                 with self.assertRaises(RuntimeError):
@@ -231,11 +231,11 @@ class VideoScheduleTest(unittest.TestCase):
         config = load_config(Path(__file__).resolve().parents[1] / "config.yaml")
         self.watcher = next(watcher for watcher in config.watchers if watcher.name == "regular_class")
 
-    def test_tuesday_window_includes_all_24_slots_and_last_minute(self) -> None:
-        """24회 예약과 마지막 실행의 지연을 허용하고 22:05부터 제외."""
-        first = datetime(2026, 9, 22, 20, 5, tzinfo=KST)
-        slots = [first + timedelta(minutes=5 * index) for index in range(24)]
-        self.assertEqual(slots[-1].strftime("%H:%M"), "22:00")
+    def test_sunday_window_includes_all_25_slots_and_last_minute(self) -> None:
+        """25회 예약과 마지막 실행의 지연을 허용하고 23:05부터 제외."""
+        first = datetime(2026, 10, 11, 21, 0, tzinfo=KST)
+        slots = [first + timedelta(minutes=5 * index) for index in range(25)]
+        self.assertEqual(slots[-1].strftime("%H:%M"), "23:00")
         self.assertTrue(all(self.watcher.is_active_at(slot) for slot in slots))
         self.assertTrue(self.watcher.is_active_at(slots[-1].replace(second=59)))
         self.assertTrue(self.watcher.is_active_at(first.astimezone(timezone.utc)))
@@ -246,6 +246,11 @@ class VideoScheduleTest(unittest.TestCase):
 
     def test_wednesday_polls_only_without_delivery_since_tuesday(self) -> None:
         """화요일 0시(한국 시간) 이후 전달 기록이 없을 때만 수요일 같은 시간대에 조회."""
+        # 운영 설정은 보조 요일을 쓰지 않으므로 화요일 기본·수요일 보조 설정으로 보조 요일 동작만 검증
+        watcher = _parse_watcher({
+            "name": "regular_class", "send_audio": False, "send_video_to_drive": True,
+            "active_days": ["tue"], "fallback_days": ["wed"], "active_hours": ["20:05", "22:04"],
+        })
         tuesday = datetime(2026, 10, 6, 20, 5, tzinfo=KST)
         wednesday = tuesday + timedelta(days=1)
         with tempfile.TemporaryDirectory() as temporary:
@@ -257,21 +262,21 @@ class VideoScheduleTest(unittest.TestCase):
                     conn.execute(
                         "insert into seen_posts (watcher_name, post_id, post_title, post_url, seen_at) "
                         "values (?, ?, '', '', ?)",
-                        (self.watcher.name, post_id, seen_at_utc),
+                        (watcher.name, post_id, seen_at_utc),
                     )
 
             # 지난주 전달과 화요일 0시 직전(월요일 23:59:59 한국 시간) 기록은 수요일 조회를 막지 않음
             deliver("last-week", "2026-09-29 11:52:13")
             deliver("before-tuesday", "2026-10-05 14:59:59")
-            self.assertEqual(self.watcher.fallback_since(wednesday), datetime(2026, 10, 6, tzinfo=KST))
-            self.assertTrue(_should_poll(store, self.watcher, wednesday))
-            self.assertTrue(_should_poll(store, self.watcher, wednesday.replace(hour=22, minute=4)))
+            self.assertEqual(watcher.fallback_since(wednesday), datetime(2026, 10, 6, tzinfo=KST))
+            self.assertTrue(_should_poll(store, watcher, wednesday))
+            self.assertTrue(_should_poll(store, watcher, wednesday.replace(hour=22, minute=4)))
             for outside in [wednesday.replace(hour=22, minute=5), wednesday + timedelta(days=1)]:
-                self.assertFalse(_should_poll(store, self.watcher, outside))
+                self.assertFalse(_should_poll(store, watcher, outside))
             # 화요일 0시 이후 전달하면 수요일 조회만 생략하고 화요일 조회는 그대로 유지
             deliver("this-week", "2026-10-05 15:00:00")
-            self.assertFalse(_should_poll(store, self.watcher, wednesday))
-            self.assertTrue(_should_poll(store, self.watcher, tuesday))
+            self.assertFalse(_should_poll(store, watcher, wednesday))
+            self.assertTrue(_should_poll(store, watcher, tuesday))
 
     def test_fallback_days_require_separate_active_days(self) -> None:
         """보조 요일은 겹치지 않는 active_days 단일 창과 함께 쓸 때만 허용."""
@@ -284,10 +289,10 @@ class VideoScheduleTest(unittest.TestCase):
                 _parse_watcher({"name": "bad", **raw})
 
     def test_polling_does_not_drift_after_processing_time(self) -> None:
-        """완료 시각이 20:06:37이어도 다음 조회는 20:10에 예약."""
-        now = datetime(2026, 9, 22, 20, 6, 37, tzinfo=KST)
+        """완료 시각이 21:06:37이어도 다음 조회는 21:10에 예약."""
+        now = datetime(2026, 10, 11, 21, 6, 37, tzinfo=KST)
         self.assertEqual(_next_poll_at(self.watcher, now), now.replace(minute=10, second=0))
-        self.assertEqual(_next_poll_at(self.watcher, now.replace(hour=21, minute=59)), now.replace(hour=22, minute=0, second=0))
+        self.assertEqual(_next_poll_at(self.watcher, now.replace(hour=22, minute=59)), now.replace(hour=23, minute=0, second=0))
 
     def test_delivery_modes_and_interval_validation(self) -> None:
         """동영상과 다른 전송 방식 혼합 및 0분 간격 거부."""
@@ -528,11 +533,11 @@ class DriveVideoTest(unittest.TestCase):
                 factory.return_value.run_local_server.assert_not_called()
 
     def test_only_previous_week_in_target_folder_is_deleted(self) -> None:
-        """수업일이 월·화요일로 바뀌어도 6~8일 전 MP4만 조회해 삭제하고 5·9일 전 파일은 유지."""
+        """수업일이 하루 밀리거나 당겨져도 6~8일 전 MP4만 조회해 삭제하고 5·9일 전 파일은 유지."""
         for new, previous in [
-            ("2026-01-05.mp4", "2025-12-29.mp4"),  # 평소 주. 연도 경계의 7일 전 월요일
-            ("2026-10-06.mp4", "2026-09-28.mp4"),  # 월요일 공휴일 주. 화요일 수업의 8일 전 월요일
-            ("2026-10-12.mp4", "2026-10-06.mp4"),  # 그다음 주. 월요일 수업의 6일 전 화요일
+            ("2026-01-05.mp4", "2025-12-29.mp4"),  # 평소 주. 연도 경계의 7일 전
+            ("2026-10-06.mp4", "2026-09-28.mp4"),  # 수업일이 하루 밀린 주. 8일 전
+            ("2026-10-12.mp4", "2026-10-06.mp4"),  # 그다음 주. 6일 전
         ]:
             with self.subTest(new=new):
                 self.files.reset_mock()

@@ -69,7 +69,7 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 # ExecutionTimeLimit 대응: LIMIT 초 초과 시 강제 종료
-# 정규수업은 잠자기 복귀로 늦게 시작해도 지정된 시간대 밖이나, 화요일에 이미 전달한 주의 수요일에는 새 폴링 생략
+# 정규수업은 잠자기 복귀로 늦게 시작해도 지정된 시간대 밖이면 새 폴링 생략
 poll_args=(poll --watcher "$WATCHER")
 if [[ "$WATCHER" == "regular_class" ]]; then
     poll_args+=(--respect-schedule)

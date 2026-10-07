@@ -276,7 +276,7 @@ def _should_poll(store: SeenStore, watcher: WatcherConfig, now: datetime) -> boo
     if not watcher.is_active_at(now):
         return False
     since = watcher.fallback_since(now)
-    # 화요일에 이미 영상을 전달한 주에는 수요일 조회 생략
+    # 기본 요일에 이미 영상을 전달한 주에는 보조 요일 조회 생략
     return since is None or not store.has_seen_since(watcher.name, since)
 
 

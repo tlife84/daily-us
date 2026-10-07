@@ -50,12 +50,11 @@ $jobs = @(
                    (New-FixedTriggers -Start '19:00' -End '22:00' -IntervalMinutes 60 -DayOfWeek 'Tuesday')
     },
     @{
-        # 화요일 정규수업은 5분 간격 확인. 이미 진행 중인 대용량 전송에는 2시간 허용
-        # 수요일 같은 시각에도 실행하되, 화요일에 전달한 영상이 있으면 Python이 조회 없이 종료
+        # 일요일 정규수업은 5분 간격 확인. 이미 진행 중인 대용량 전송에는 2시간 허용
         TaskName = 'daily-us regular class'
         Script   = 'poll-regular-class.ps1'
         Limit    = 'PT2H'
-        Triggers = (New-FixedTriggers -Start '20:05' -End '22:00' -IntervalMinutes 5 -DayOfWeek 'Tuesday', 'Wednesday')
+        Triggers = (New-FixedTriggers -Start '21:00' -End '23:00' -IntervalMinutes 5 -DayOfWeek 'Sunday')
     }
 )
 

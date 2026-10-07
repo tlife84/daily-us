@@ -176,7 +176,7 @@ class DriveClient:
             filename: 새로 업로드할 영상 파일명. 이 날짜의 6~8일 전 날짜만 삭제.
         """
         lesson_date = _lesson_date(filename)
-        # 수업일은 월요일이고 월요일이 공휴일인 주만 화요일이라 전 주 영상은 6~8일 전에 있음. 주에 한 번만 올리므로 다른 주 영상은 범위 밖
+        # 전 주 영상은 보통 7일 전이고, 수업일이 하루 밀리거나 당겨진 주도 지우도록 앞뒤 하루 포함. 주에 한 번만 올리므로 다른 주 영상은 범위 밖
         for days_back in (6, 7, 8):
             previous = f"{(lesson_date - timedelta(days=days_back)).isoformat()}.mp4"
             for candidate in self.find_videos(previous):

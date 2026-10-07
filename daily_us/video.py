@@ -4,7 +4,7 @@ import math
 import re
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -30,8 +30,8 @@ class PostVideo:
 
     @property
     def filename(self) -> str:
-        """한국 시간 게시일의 하루 전 날짜를 MP4 파일명으로 반환."""
-        lesson_date = self.published_at.astimezone(KST).date() - timedelta(days=1)
+        """수업 당일에 올라오는 영상이므로 한국 시간 게시일을 MP4 파일명으로 반환."""
+        lesson_date = self.published_at.astimezone(KST).date()
         return f"{lesson_date.isoformat()}.mp4"
 
 
